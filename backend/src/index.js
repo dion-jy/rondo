@@ -3,7 +3,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import jobRoutes from './routes/jobs.js';
-import { emitter } from './openclawData.js';
+import { emitter, getJobs, getAllRuns } from './openclawData.js';
 
 const app = express();
 const server = createServer(app);
@@ -13,7 +13,24 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/health', (req, res) => {
+  const jobs = getJobs();
+  const allRunsMap = getAllRuns();
+  let runCount = 0;
+  let lastUpdate = 0;
+  for (const [, runs] of allRunsMap) {
+    runCount += runs.length;
+    for (const r of runs) {
+      if (r.ts && r.ts > lastUpdate) lastUpdate = r.ts;
+    }
+  }
+  res.json({
+    ok: true,
+    jobCount: jobs.length,
+    runCount,
+    lastUpdate: lastUpdate || null,
+  });
+});
 app.use('/api/jobs', jobRoutes);
 
 // WebSocket: push updates on file changes

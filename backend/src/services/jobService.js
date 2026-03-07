@@ -224,6 +224,72 @@ export function getStats() {
     estimatedDailySessionSeconds += runsPerDay * timeout;
   }
 
+  // Token economy: burning rate, by-model breakdown, projections, cost estimates
+  // Cost per million tokens: Sonnet $3 input / $15 output, Opus $15 input / $75 output
+  const MODEL_COSTS = {
+    'sonnet': { input: 3, output: 15 },
+    'opus': { input: 15, output: 75 },
+  };
+
+  const byModel = {};
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let oldestRunTs = Infinity;
+  let newestRunTs = 0;
+
+  for (const [, runs] of allRunsMap) {
+    for (const r of runs) {
+      const model = r.model || 'unknown';
+      if (!byModel[model]) {
+        byModel[model] = { runs: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0 };
+      }
+      byModel[model].runs++;
+      const input = r.usage?.input_tokens || 0;
+      const output = r.usage?.output_tokens || 0;
+      const total = r.usage?.total_tokens || (input + output);
+      byModel[model].totalTokens += total;
+      byModel[model].inputTokens += input;
+      byModel[model].outputTokens += output;
+      totalInputTokens += input;
+      totalOutputTokens += output;
+      if (r.ts && r.ts < oldestRunTs) oldestRunTs = r.ts;
+      if (r.ts && r.ts > newestRunTs) newestRunTs = r.ts;
+    }
+  }
+
+  // Calculate burning rate from 7d window (more stable than 24h)
+  const hoursIn7d = tokenCount7d > 0 ? Math.max((now - (now - week)) / 3600000, 1) : 1;
+  const tokensPerHour7d = tokenCount7d / hoursIn7d;
+  const burningRate = {
+    perHour: Math.round(tokensPerHour7d),
+    perDay: Math.round(tokensPerHour7d * 24),
+    perWeek: Math.round(tokenCount7d),
+  };
+
+  const projectedMonthly = Math.round(burningRate.perDay * 30);
+
+  // Cost estimate based on model breakdown
+  let costEstimate = { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
+  for (const [model, data] of Object.entries(byModel)) {
+    const modelLower = model.toLowerCase();
+    let rates = MODEL_COSTS.sonnet; // default to sonnet rates
+    if (modelLower.includes('opus')) rates = MODEL_COSTS.opus;
+    else if (modelLower.includes('sonnet')) rates = MODEL_COSTS.sonnet;
+
+    costEstimate.inputCost += (data.inputTokens / 1_000_000) * rates.input;
+    costEstimate.outputCost += (data.outputTokens / 1_000_000) * rates.output;
+  }
+  costEstimate.totalCost = costEstimate.inputCost + costEstimate.outputCost;
+  costEstimate.inputCost = Math.round(costEstimate.inputCost * 100) / 100;
+  costEstimate.outputCost = Math.round(costEstimate.outputCost * 100) / 100;
+  costEstimate.totalCost = Math.round(costEstimate.totalCost * 100) / 100;
+
+  // Projected monthly cost
+  const historyDays = totalRuns > 0 && oldestRunTs < Infinity
+    ? Math.max((newestRunTs - oldestRunTs) / 86400000, 1)
+    : 1;
+  const projectedMonthlyCost = Math.round((costEstimate.totalCost / historyDays) * 30 * 100) / 100;
+
   return {
     totalJobs: jobs.length,
     enabled,
@@ -242,7 +308,192 @@ export function getStats() {
     estimatedDailyTokens: tokenCount7d > 0 && runCount7d > 0
       ? Math.round((tokenCount7d / runCount7d) * (runCount24h || 1))
       : 0,
+    burningRate,
+    byModel,
+    projectedMonthly,
+    costEstimate,
+    projectedMonthlyCost,
   };
+}
+
+export function getConflicts(hours = 24) {
+  const events = getTimeline(hours);
+  const conflicts = [];
+  const gaps = [];
+
+  // Detect overlaps: each event has a duration = timeoutSeconds or 120s default
+  const intervals = events.map(e => ({
+    jobId: e.jobId,
+    jobName: e.jobName,
+    start: e.time,
+    end: e.time + (e.timeoutSeconds || 120) * 1000,
+  }));
+
+  for (let i = 0; i < intervals.length; i++) {
+    for (let j = i + 1; j < intervals.length; j++) {
+      const a = intervals[i];
+      const b = intervals[j];
+      // Overlap if a.start < b.end && b.start < a.end
+      if (a.start < b.end && b.start < a.end) {
+        // Use the later start as the conflict time
+        const conflictTime = Math.max(a.start, b.start);
+        // Check if we already have a conflict at this exact time with these jobs
+        const existing = conflicts.find(c =>
+          c.time === conflictTime &&
+          c.jobs.some(j2 => j2.id === a.jobId) &&
+          c.jobs.some(j2 => j2.id === b.jobId)
+        );
+        if (!existing) {
+          conflicts.push({
+            time: conflictTime,
+            jobs: [
+              { id: a.jobId, name: a.jobName },
+              { id: b.jobId, name: b.jobName },
+            ],
+            type: 'overlap',
+          });
+        }
+      }
+    }
+  }
+
+  // Detect gaps: periods > 2 hours where nothing is scheduled
+  if (intervals.length > 0) {
+    const sorted = [...intervals].sort((a, b) => a.start - b.start);
+    const now = Date.now();
+    const windowEnd = now + hours * 3600000;
+    const TWO_HOURS = 2 * 3600000;
+
+    // Merge overlapping intervals to find covered periods
+    const merged = [{ start: sorted[0].start, end: sorted[0].end }];
+    for (let i = 1; i < sorted.length; i++) {
+      const last = merged[merged.length - 1];
+      if (sorted[i].start <= last.end) {
+        last.end = Math.max(last.end, sorted[i].end);
+      } else {
+        merged.push({ start: sorted[i].start, end: sorted[i].end });
+      }
+    }
+
+    // Check gap from now to first event
+    if (merged[0].start - now > TWO_HOURS) {
+      gaps.push({
+        start: now,
+        end: merged[0].start,
+        durationMs: merged[0].start - now,
+      });
+    }
+
+    // Check gaps between merged intervals
+    for (let i = 1; i < merged.length; i++) {
+      const gapStart = merged[i - 1].end;
+      const gapEnd = merged[i].start;
+      if (gapEnd - gapStart > TWO_HOURS) {
+        gaps.push({
+          start: gapStart,
+          end: gapEnd,
+          durationMs: gapEnd - gapStart,
+        });
+      }
+    }
+
+    // Check gap from last event to window end
+    const lastEnd = merged[merged.length - 1].end;
+    if (windowEnd - lastEnd > TWO_HOURS) {
+      gaps.push({
+        start: lastEnd,
+        end: windowEnd,
+        durationMs: windowEnd - lastEnd,
+      });
+    }
+  } else {
+    // No events at all — entire window is a gap
+    const now = Date.now();
+    const windowEnd = now + hours * 3600000;
+    gaps.push({
+      start: now,
+      end: windowEnd,
+      durationMs: hours * 3600000,
+    });
+  }
+
+  return { conflicts, gaps };
+}
+
+export function getSuggestions() {
+  const jobs = getJobs().map(enrichJob);
+  const allRunsMap = getAllRuns();
+  const suggestions = [];
+
+  for (const job of jobs) {
+    // Jobs that consistently fail
+    if (job.consecutiveErrors > 0) {
+      suggestions.push({
+        type: 'failing_job',
+        severity: job.consecutiveErrors >= 3 ? 'high' : 'medium',
+        message: `"${job.name}" has ${job.consecutiveErrors} consecutive error(s). Check its configuration or target.`,
+        jobId: job.id,
+        details: { consecutiveErrors: job.consecutiveErrors },
+      });
+    }
+
+    // Jobs with schedule errors
+    if (job.state?.lastError && job.state.lastError.includes('schedule')) {
+      suggestions.push({
+        type: 'schedule_error',
+        severity: 'high',
+        message: `"${job.name}" has a schedule-related error.`,
+        jobId: job.id,
+        details: { error: job.state.lastError },
+      });
+    }
+
+    // Disabled jobs that might need attention
+    if (!job.enabled) {
+      const runs = allRunsMap.get(job.id) || [];
+      const hasRecentRuns = runs.some(r => r.ts && r.ts > Date.now() - 7 * 86400000);
+      suggestions.push({
+        type: 'disabled_job',
+        severity: 'low',
+        message: `"${job.name}" is disabled.${hasRecentRuns ? ' It had recent activity — consider re-enabling or removing it.' : ' Consider removing it if no longer needed.'}`,
+        jobId: job.id,
+        details: { hasRecentRuns },
+      });
+    }
+
+    // Jobs that always succeed and could be run less frequently
+    if (job.enabled && job.scheduleKind === 'recurring') {
+      const runs = allRunsMap.get(job.id) || [];
+      if (runs.length >= 10) {
+        const recent = runs.slice(0, 20);
+        const allSuccess = recent.every(r => r.status === 'ok');
+        if (allSuccess) {
+          suggestions.push({
+            type: 'reduce_frequency',
+            severity: 'low',
+            message: `"${job.name}" has succeeded in all recent runs. Consider reducing frequency to save tokens.`,
+            jobId: job.id,
+            details: { recentRunCount: recent.length, allSuccess: true },
+          });
+        }
+      }
+    }
+  }
+
+  // Gaps where new tasks could be scheduled
+  const { gaps } = getConflicts(24);
+  for (const gap of gaps) {
+    if (gap.durationMs > 4 * 3600000) {
+      suggestions.push({
+        type: 'schedule_gap',
+        severity: 'low',
+        message: `${Math.round(gap.durationMs / 3600000)}h gap from ${new Date(gap.start).toISOString()} to ${new Date(gap.end).toISOString()}. Consider scheduling tasks here.`,
+        details: { start: gap.start, end: gap.end, durationMs: gap.durationMs },
+      });
+    }
+  }
+
+  return { suggestions };
 }
 
 function parseEveryString(every) {
