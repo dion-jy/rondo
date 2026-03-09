@@ -1,0 +1,238 @@
+import { readFileSync, readdirSync, existsSync } from "fs";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import type {
+  CronJob,
+  CronRun,
+  RondoPluginConfig,
+  SupabaseCronJob,
+  SupabaseCronRun,
+} from "./types.js";
+import { SUPABASE_BATCH_SIZE } from "./config.js";
+
+// ── Instance ID (stable per gateway boot, identifies this OpenClaw instance) ──
+
+let instanceId: string | undefined;
+
+function getInstanceId(cronDir: string): string {
+  if (instanceId) return instanceId;
+
+  const idPath = join(cronDir, "..", ".rondo-instance-id");
+  try {
+    if (existsSync(idPath)) {
+      instanceId = readFileSync(idPath, "utf-8").trim();
+    }
+  } catch {
+    // ignore
+  }
+  if (!instanceId) {
+    instanceId = randomUUID();
+    try {
+      const { writeFileSync } = require("fs");
+      writeFileSync(idPath, instanceId, "utf-8");
+    } catch {
+      // non-critical — will regenerate on next boot
+    }
+  }
+  return instanceId;
+}
+
+// ── Read local cron data ──
+
+export function readJobs(cronDir: string): CronJob[] {
+  const jobsPath = join(cronDir, "jobs.json");
+  if (!existsSync(jobsPath)) return [];
+  try {
+    const raw = readFileSync(jobsPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function readRuns(cronDir: string): CronRun[] {
+  const runsDir = join(cronDir, "runs");
+  if (!existsSync(runsDir)) return [];
+
+  const runs: CronRun[] = [];
+  try {
+    const files = readdirSync(runsDir).filter((f) => f.endsWith(".jsonl"));
+    for (const file of files) {
+      const lines = readFileSync(join(runsDir, file), "utf-8")
+        .split("\n")
+        .filter(Boolean);
+      for (const line of lines) {
+        try {
+          runs.push(JSON.parse(line));
+        } catch {
+          // skip malformed lines
+        }
+      }
+    }
+  } catch {
+    // ignore read errors
+  }
+
+  return runs;
+}
+
+// ── Transform to Supabase rows ──
+
+function toSupabaseJob(job: CronJob, instId: string): SupabaseCronJob {
+  const now = new Date().toISOString();
+  return {
+    id: job.id,
+    instance_id: instId,
+    name: job.name,
+    agent_id: job.agentId ?? null,
+    enabled: job.enabled,
+    schedule_kind: job.schedule?.kind ?? null,
+    schedule_every_ms: job.schedule?.everyMs ?? null,
+    schedule_expr: job.schedule?.expr ?? null,
+    schedule_at: job.schedule?.at ?? null,
+    session_target: job.sessionTarget ?? null,
+    wake_mode: job.wakeMode ?? null,
+    delete_after_run: job.deleteAfterRun ?? false,
+    delivery_mode: job.delivery?.mode ?? null,
+    delivery_channel: job.delivery?.channel ?? null,
+    payload_model: job.payload?.model ?? null,
+    payload_thinking: job.payload?.thinking ?? null,
+    timeout_seconds: job.payload?.timeoutSeconds ?? null,
+    next_run_at: job.state?.nextRunAtMs
+      ? new Date(job.state.nextRunAtMs).toISOString()
+      : null,
+    last_run_at: job.state?.lastRunAtMs
+      ? new Date(job.state.lastRunAtMs).toISOString()
+      : null,
+    last_status: job.state?.lastStatus ?? null,
+    last_duration_ms: job.state?.lastDurationMs ?? null,
+    last_error: job.state?.lastError ?? null,
+    consecutive_errors: job.state?.consecutiveErrors ?? 0,
+    is_running: !!job.state?.runningAtMs,
+    created_at: job.createdAtMs
+      ? new Date(job.createdAtMs).toISOString()
+      : null,
+    updated_at: job.updatedAtMs
+      ? new Date(job.updatedAtMs).toISOString()
+      : null,
+    synced_at: now,
+  };
+}
+
+function toSupabaseRun(run: CronRun, instId: string): SupabaseCronRun {
+  const now = new Date().toISOString();
+  // Use ts + jobId as a deterministic ID to avoid duplicates
+  const id = `${run.jobId}-${run.ts}`;
+  return {
+    id,
+    instance_id: instId,
+    job_id: run.jobId,
+    timestamp: new Date(run.ts).toISOString(),
+    status: run.status,
+    action: run.action ?? null,
+    summary: run.summary ?? null,
+    error: run.error ?? null,
+    duration_ms: run.durationMs ?? null,
+    model: run.model ?? null,
+    provider: run.provider ?? null,
+    session_id: run.sessionId ?? null,
+    delivered: run.delivered ?? null,
+    delivery_status: run.deliveryStatus ?? null,
+    input_tokens: run.usage?.input_tokens ?? null,
+    output_tokens: run.usage?.output_tokens ?? null,
+    total_tokens: run.usage?.total_tokens ?? null,
+    synced_at: now,
+  };
+}
+
+// ── Supabase REST client (no SDK dependency — just fetch) ──
+
+async function supabaseUpsert(
+  url: string,
+  key: string,
+  table: string,
+  rows: Record<string, unknown>[],
+  conflictColumn: string = "id"
+): Promise<{ ok: boolean; error?: string }> {
+  if (rows.length === 0) return { ok: true };
+
+  try {
+    const resp = await fetch(`${url}/rest/v1/${table}`, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        Prefer: `resolution=merge-duplicates,return=minimal`,
+      },
+      body: JSON.stringify(rows),
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { ok: false, error: `HTTP ${resp.status}: ${body}` };
+    }
+    return { ok: true };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ── Main sync function ──
+
+export async function syncToSupabase(
+  cronDir: string,
+  config: RondoPluginConfig,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+): Promise<void> {
+  const { supabaseUrl, supabaseKey } = config;
+  if (!supabaseUrl || !supabaseKey) {
+    logger.warn("[rondo] Supabase not configured — skipping sync");
+    return;
+  }
+
+  const instId = getInstanceId(cronDir);
+  const jobs = readJobs(cronDir);
+  const runs = readRuns(cronDir);
+
+  logger.info(
+    `[rondo] Syncing ${jobs.length} jobs + ${runs.length} runs to Supabase`
+  );
+
+  // ── Upsert jobs ──
+  const jobRows = jobs.map((j) => toSupabaseJob(j, instId));
+  const jobResult = await supabaseUpsert(
+    supabaseUrl,
+    supabaseKey,
+    "cron_jobs",
+    jobRows as unknown as Record<string, unknown>[]
+  );
+  if (!jobResult.ok) {
+    logger.error(`[rondo] Failed to sync jobs: ${jobResult.error}`);
+  }
+
+  // ── Upsert runs in batches ──
+  const runRows = runs.map((r) => toSupabaseRun(r, instId));
+  let runErrors = 0;
+  for (let i = 0; i < runRows.length; i += SUPABASE_BATCH_SIZE) {
+    const batch = runRows.slice(i, i + SUPABASE_BATCH_SIZE);
+    const result = await supabaseUpsert(
+      supabaseUrl,
+      supabaseKey,
+      "cron_runs",
+      batch as unknown as Record<string, unknown>[]
+    );
+    if (!result.ok) {
+      logger.error(`[rondo] Failed to sync run batch: ${result.error}`);
+      runErrors++;
+    }
+  }
+
+  if (runErrors === 0 && jobResult.ok) {
+    logger.info("[rondo] Sync completed successfully");
+  }
+}

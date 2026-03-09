@@ -1,0 +1,14 @@
+{
+  "id": "rondo",
+  "name": "Rondo",
+  "description": "Cron monitoring dashboard — syncs job/run data to external storage",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "supabaseUrl": { "type": "string" },
+      "supabaseKey": { "type": "string" },
+      "syncIntervalMs": { "type": "number", "default": 300000 }
+    }
+  }
+}
