@@ -58,6 +58,14 @@ rondo/
 
 Backend services are cleanly separated for future mobile app extension.
 
+## OpenClaw Plugin Mode (Recommended)
+
+Rondo can run as a native OpenClaw extension under `~/.openclaw/extensions/rondo`.
+
+- Detailed install/verify/troubleshooting guide:
+  - `docs/OPENCLAW_PLUGIN.md`
+- Includes required manifest fields (`configSchema`), route registration, and API-vs-UI fallback debugging.
+
 ## Quick Start
 
 ```bash
