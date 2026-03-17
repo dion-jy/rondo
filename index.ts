@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { join } from "path";
+import { existsSync } from "fs";
 import { resolveConfig, isConfigured } from "./src/config.js";
 import { syncToSupabase } from "./src/sync.js";
 
@@ -36,11 +37,17 @@ const plugin = {
       id: "rondo-sync",
 
       async start(ctx) {
-        const cronDir = join(ctx.stateDir, "..", "cron");
+        const candidates = [
+          join(ctx.stateDir, "..", "cron"),
+          join(ctx.stateDir, "..", "..", "cron"),
+          "/root/.openclaw/cron",
+        ];
+        const cronDir =
+          candidates.find((d) => existsSync(join(d, "jobs.json"))) ?? candidates[0];
         const interval = config.syncIntervalMs ?? 300_000;
 
         ctx.logger.info(
-          `[rondo] Service started — sync every ${Math.round(interval / 1000)}s`
+          `[rondo] Service started — sync every ${Math.round(interval / 1000)}s (cronDir=${cronDir})`
         );
 
         // Initial sync after a short delay (let gateway finish startup)

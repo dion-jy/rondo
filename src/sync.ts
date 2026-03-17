@@ -45,7 +45,9 @@ export function readJobs(cronDir: string): CronJob[] {
   try {
     const raw = readFileSync(jobsPath, "utf-8");
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.jobs)) return parsed.jobs;
+    return [];
   } catch {
     return [];
   }
