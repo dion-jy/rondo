@@ -186,6 +186,59 @@ async function supabaseUpsert(
   }
 }
 
+// ── Delete orphaned rows from Supabase ──
+
+async function supabaseDeleteOrphans(
+  url: string,
+  key: string,
+  table: string,
+  instId: string,
+  localIds: Set<string>,
+  userId: string | null
+): Promise<{ ok: boolean; deleted?: number; error?: string }> {
+  try {
+    // Fetch all job IDs for this instance from Supabase
+    let fetchUrl = `${url}/rest/v1/${table}?instance_id=eq.${encodeURIComponent(instId)}&select=id`;
+    if (userId) {
+      fetchUrl += `&user_id=eq.${encodeURIComponent(userId)}`;
+    }
+    const resp = await fetch(fetchUrl, {
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+      },
+    });
+    if (!resp.ok) {
+      return { ok: false, error: `Fetch HTTP ${resp.status}` };
+    }
+    const remoteRows: { id: string }[] = await resp.json();
+    const orphanIds = remoteRows.map((r) => r.id).filter((id) => !localIds.has(id));
+
+    if (orphanIds.length === 0) return { ok: true, deleted: 0 };
+
+    // Delete orphans
+    const idsParam = orphanIds.map((id) => `"${id}"`).join(",");
+    const delResp = await fetch(
+      `${url}/rest/v1/${table}?id=in.(${idsParam})`,
+      {
+        method: "DELETE",
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          Prefer: "return=minimal",
+        },
+      }
+    );
+    if (!delResp.ok) {
+      const body = await delResp.text().catch(() => "");
+      return { ok: false, error: `Delete HTTP ${delResp.status}: ${body}` };
+    }
+    return { ok: true, deleted: orphanIds.length };
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // ── Main sync function ──
 
 export async function syncToSupabase(
@@ -222,6 +275,24 @@ export async function syncToSupabase(
   );
   if (!jobResult.ok) {
     logger.error(`[rondo] Failed to sync jobs: ${jobResult.error}`);
+  }
+
+  // ── Delete orphaned jobs (exist in Supabase but not locally) ──
+  if (jobResult.ok) {
+    const localJobIds = new Set(jobs.map((j) => j.id));
+    const deleteResult = await supabaseDeleteOrphans(
+      supabaseUrl,
+      supabaseKey,
+      "cron_jobs",
+      instId,
+      localJobIds,
+      uid
+    );
+    if (!deleteResult.ok) {
+      logger.warn(`[rondo] Failed to delete orphaned jobs: ${deleteResult.error}`);
+    } else if (deleteResult.deleted) {
+      logger.info(`[rondo] Deleted ${deleteResult.deleted} orphaned jobs from Supabase`);
+    }
   }
 
   // ── Upsert runs in batches ──

@@ -4,10 +4,19 @@
   "type": "module",
   "main": "index.ts",
   "description": "OpenClaw plugin — syncs cron job/run data to Supabase for external dashboard",
-  "keywords": ["openclaw", "plugin", "cron", "monitoring", "supabase"],
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "cron",
+    "monitoring",
+    "supabase"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/dion-jy/rondo.git"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }
