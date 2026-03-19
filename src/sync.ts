@@ -81,7 +81,7 @@ export function readRuns(cronDir: string): CronRun[] {
 
 // ── Transform to Supabase rows ──
 
-function toSupabaseJob(job: CronJob, instId: string): SupabaseCronJob {
+function toSupabaseJob(job: CronJob, instId: string, userId: string | null): SupabaseCronJob {
   const now = new Date().toISOString();
   return {
     id: job.id,
@@ -119,10 +119,11 @@ function toSupabaseJob(job: CronJob, instId: string): SupabaseCronJob {
       ? new Date(job.updatedAtMs).toISOString()
       : null,
     synced_at: now,
+    user_id: userId,
   };
 }
 
-function toSupabaseRun(run: CronRun, instId: string): SupabaseCronRun {
+function toSupabaseRun(run: CronRun, instId: string, userId: string | null): SupabaseCronRun {
   const now = new Date().toISOString();
   // Use ts + jobId as a deterministic ID to avoid duplicates
   const id = `${run.jobId}-${run.ts}`;
@@ -145,6 +146,7 @@ function toSupabaseRun(run: CronRun, instId: string): SupabaseCronRun {
     output_tokens: run.usage?.output_tokens ?? null,
     total_tokens: run.usage?.total_tokens ?? null,
     synced_at: now,
+    user_id: userId,
   };
 }
 
@@ -191,10 +193,14 @@ export async function syncToSupabase(
   config: RondoPluginConfig,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<void> {
-  const { supabaseUrl, supabaseKey } = config;
+  const { supabaseUrl, supabaseKey, userId } = config;
   if (!supabaseUrl || !supabaseKey) {
     logger.warn("[rondo] Supabase not configured — skipping sync");
     return;
+  }
+
+  if (!userId) {
+    logger.warn("[rondo] No user_id configured (set RONDO_USER_ID) — sync may fail with RLS");
   }
 
   const instId = getInstanceId(cronDir);
@@ -206,7 +212,8 @@ export async function syncToSupabase(
   );
 
   // ── Upsert jobs ──
-  const jobRows = jobs.map((j) => toSupabaseJob(j, instId));
+  const uid = userId ?? null;
+  const jobRows = jobs.map((j) => toSupabaseJob(j, instId, uid));
   const jobResult = await supabaseUpsert(
     supabaseUrl,
     supabaseKey,
@@ -218,7 +225,7 @@ export async function syncToSupabase(
   }
 
   // ── Upsert runs in batches ──
-  const runRows = runs.map((r) => toSupabaseRun(r, instId));
+  const runRows = runs.map((r) => toSupabaseRun(r, instId, uid));
   let runErrors = 0;
   for (let i = 0; i < runRows.length; i += SUPABASE_BATCH_SIZE) {
     const batch = runRows.slice(i, i + SUPABASE_BATCH_SIZE);

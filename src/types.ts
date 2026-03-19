@@ -107,6 +107,7 @@ export interface SupabaseCronJob {
   created_at: string | null;
   updated_at: string | null;
   synced_at: string;
+  user_id: string | null;
 }
 
 export interface SupabaseCronRun {
@@ -128,6 +129,7 @@ export interface SupabaseCronRun {
   output_tokens: number | null;
   total_tokens: number | null;
   synced_at: string;
+  user_id: string | null;
 }
 
 // ── Plugin Config ──
@@ -136,4 +138,5 @@ export interface RondoPluginConfig {
   supabaseUrl?: string;
   supabaseKey?: string;
   syncIntervalMs?: number;
+  userId?: string;
 }

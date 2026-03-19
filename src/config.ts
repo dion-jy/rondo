@@ -14,6 +14,7 @@ export function resolveConfig(pluginConfig?: Record<string, unknown>): RondoPlug
     supabaseUrl: cfg.supabaseUrl || process.env.RONDO_SUPABASE_URL || undefined,
     supabaseKey: cfg.supabaseKey || process.env.RONDO_SUPABASE_KEY || undefined,
     syncIntervalMs: cfg.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS,
+    userId: cfg.userId || process.env.RONDO_USER_ID || undefined,
   };
 }
 
