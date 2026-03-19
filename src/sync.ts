@@ -186,18 +186,18 @@ async function supabaseUpsert(
   }
 }
 
-// ── Soft-delete orphaned jobs (mark enabled=false, never hard-delete) ──
+// ── Delete orphaned jobs from Supabase (cron_runs history is preserved) ──
 
-async function supabaseSoftDeleteOrphans(
+async function supabaseDeleteOrphans(
   url: string,
   key: string,
   instId: string,
   localIds: Set<string>,
   userId: string | null
-): Promise<{ ok: boolean; marked?: number; error?: string }> {
+): Promise<{ ok: boolean; deleted?: number; error?: string }> {
   try {
-    // Fetch active job IDs for this instance from Supabase
-    let fetchUrl = `${url}/rest/v1/cron_jobs?instance_id=eq.${encodeURIComponent(instId)}&enabled=eq.true&select=id`;
+    // Fetch job IDs for this instance from Supabase
+    let fetchUrl = `${url}/rest/v1/cron_jobs?instance_id=eq.${encodeURIComponent(instId)}&select=id`;
     if (userId) {
       fetchUrl += `&user_id=eq.${encodeURIComponent(userId)}`;
     }
@@ -213,28 +213,26 @@ async function supabaseSoftDeleteOrphans(
     const remoteRows: { id: string }[] = await resp.json();
     const orphanIds = remoteRows.map((r) => r.id).filter((id) => !localIds.has(id));
 
-    if (orphanIds.length === 0) return { ok: true, marked: 0 };
+    if (orphanIds.length === 0) return { ok: true, deleted: 0 };
 
-    // Soft-delete: set enabled=false (preserves row + run history)
+    // Hard delete orphaned jobs (cron_runs has no FK cascade, history preserved)
     const idsParam = orphanIds.map((id) => `"${id}"`).join(",");
-    const patchResp = await fetch(
+    const delResp = await fetch(
       `${url}/rest/v1/cron_jobs?id=in.(${idsParam})`,
       {
-        method: "PATCH",
+        method: "DELETE",
         headers: {
           apikey: key,
           Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json",
           Prefer: "return=minimal",
         },
-        body: JSON.stringify({ enabled: false, synced_at: new Date().toISOString() }),
       }
     );
-    if (!patchResp.ok) {
-      const body = await patchResp.text().catch(() => "");
-      return { ok: false, error: `Patch HTTP ${patchResp.status}: ${body}` };
+    if (!delResp.ok) {
+      const body = await delResp.text().catch(() => "");
+      return { ok: false, error: `Delete HTTP ${delResp.status}: ${body}` };
     }
-    return { ok: true, marked: orphanIds.length };
+    return { ok: true, deleted: orphanIds.length };
   } catch (err: unknown) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -278,20 +276,20 @@ export async function syncToSupabase(
     logger.error(`[rondo] Failed to sync jobs: ${jobResult.error}`);
   }
 
-  // ── Soft-delete orphaned jobs (mark enabled=false, preserve history) ──
+  // ── Delete orphaned jobs (not in local jobs.json; run history preserved) ──
   if (jobResult.ok) {
     const localJobIds = new Set(jobs.map((j) => j.id));
-    const softResult = await supabaseSoftDeleteOrphans(
+    const delResult = await supabaseDeleteOrphans(
       supabaseUrl,
       supabaseKey,
       instId,
       localJobIds,
       uid
     );
-    if (!softResult.ok) {
-      logger.warn(`[rondo] Failed to soft-delete orphaned jobs: ${softResult.error}`);
-    } else if (softResult.marked) {
-      logger.info(`[rondo] Marked ${softResult.marked} orphaned jobs as disabled in Supabase`);
+    if (!delResult.ok) {
+      logger.warn(`[rondo] Failed to delete orphaned jobs: ${delResult.error}`);
+    } else if (delResult.deleted) {
+      logger.info(`[rondo] Deleted ${delResult.deleted} orphaned jobs from Supabase`);
     }
   }
 
