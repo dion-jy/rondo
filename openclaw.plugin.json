@@ -8,7 +8,8 @@
     "properties": {
       "supabaseUrl": { "type": "string" },
       "supabaseKey": { "type": "string" },
-      "syncIntervalMs": { "type": "number", "default": 300000 }
+      "syncIntervalMs": { "type": "number", "default": 300000 },
+      "userId": { "type": "string" }
     }
   }
 }
