@@ -1,7 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { join } from "path";
 import { existsSync } from "fs";
-import { resolveConfig, isConfigured } from "./src/config.js";
+import { resolveConfig } from "./src/config.js";
 import { syncToSupabase } from "./src/sync.js";
 
 const plugin = {
@@ -14,11 +14,7 @@ const plugin = {
       type: "object",
       additionalProperties: false,
       properties: {
-        supabaseUrl: { type: "string" },
-        supabaseKey: { type: "string" },
         syncIntervalMs: { type: "number", default: 300000 },
-        userId: { type: "string" },
-        supabaseAuthEmail: { type: "string" },
       },
     },
   },
@@ -26,13 +22,6 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     const config = resolveConfig(api.pluginConfig);
     const logger = api.logger;
-
-    if (!isConfigured(config)) {
-      logger.info(
-        "[rondo] Supabase not configured — plugin loaded but sync disabled. " +
-        "Set supabaseUrl + supabaseKey in plugin config or env (RONDO_SUPABASE_URL, RONDO_SUPABASE_KEY)."
-      );
-    }
 
     // Register as a background service for periodic sync
     api.registerService({
@@ -55,7 +44,7 @@ const plugin = {
         // Initial sync after a short delay (let gateway finish startup)
         const initialDelay = setTimeout(async () => {
           try {
-            await syncToSupabase(cronDir, config, ctx.logger);
+            await syncToSupabase(cronDir, ctx.logger);
           } catch (err) {
             ctx.logger.error(
               `[rondo] Initial sync error: ${err instanceof Error ? err.message : String(err)}`
@@ -66,7 +55,7 @@ const plugin = {
         // Periodic sync
         const timer = setInterval(async () => {
           try {
-            await syncToSupabase(cronDir, config, ctx.logger);
+            await syncToSupabase(cronDir, ctx.logger);
           } catch (err) {
             ctx.logger.error(
               `[rondo] Sync error: ${err instanceof Error ? err.message : String(err)}`
@@ -94,11 +83,8 @@ const plugin = {
       description: "Show Rondo sync status",
       requireAuth: true,
       handler(_cmdCtx) {
-        const configured = isConfigured(config);
         return {
-          text: configured
-            ? `🎵 Rondo: Supabase sync active (every ${Math.round((config.syncIntervalMs ?? 300000) / 1000)}s)\nURL: ${config.supabaseUrl?.replace(/\/\/(.{6}).*@/, "//$1***@") ?? "—"}`
-            : "🎵 Rondo: loaded but Supabase not configured. Set supabaseUrl + supabaseKey.",
+          text: `🎵 Rondo: Supabase sync active (every ${Math.round((config.syncIntervalMs ?? 300000) / 1000)}s)`,
         };
       },
     });

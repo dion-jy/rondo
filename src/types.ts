@@ -135,9 +135,5 @@ export interface SupabaseCronRun {
 // ── Plugin Config ──
 
 export interface RondoPluginConfig {
-  supabaseUrl?: string;
-  supabaseKey?: string;
   syncIntervalMs?: number;
-  userId?: string;
-  supabaseAuthEmail?: string;
 }

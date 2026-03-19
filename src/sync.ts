@@ -4,64 +4,10 @@ import { randomUUID } from "crypto";
 import type {
   CronJob,
   CronRun,
-  RondoPluginConfig,
   SupabaseCronJob,
   SupabaseCronRun,
 } from "./types.js";
-import { SUPABASE_BATCH_SIZE } from "./config.js";
-
-// ── Resolve Supabase Auth email → UUID ──
-
-let cachedAuthUid: string | null = null;
-let cachedAuthEmail: string | null = null;
-
-async function resolveAuthUserId(
-  url: string,
-  key: string,
-  email: string,
-  logger: { warn: (msg: string) => void }
-): Promise<string | null> {
-  // Return cached value if email hasn't changed
-  if (cachedAuthEmail === email && cachedAuthUid) return cachedAuthUid;
-
-  try {
-    const resp = await fetch(`${url}/auth/v1/admin/users?page=1&per_page=100`, {
-      headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
-      },
-    });
-
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      logger.warn(`[rondo] Failed to resolve auth email (HTTP ${resp.status}): ${body}`);
-      return null;
-    }
-
-    const data = await resp.json();
-    const users: { id: string; email?: string }[] = data.users ?? data;
-    const match = users.find(
-      (u) => u.email?.toLowerCase() === email.toLowerCase()
-    );
-
-    if (!match) {
-      logger.warn(
-        `[rondo] No Supabase Auth user found for email "${email}". ` +
-        `Make sure this email has logged in via the Rondo UI at least once.`
-      );
-      return null;
-    }
-
-    cachedAuthEmail = email;
-    cachedAuthUid = match.id;
-    return match.id;
-  } catch (err) {
-    logger.warn(
-      `[rondo] Error resolving auth email: ${err instanceof Error ? err.message : String(err)}`
-    );
-    return null;
-  }
-}
+import { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_BATCH_SIZE } from "./config.js";
 
 // ── Instance ID (stable per gateway boot, identifies this OpenClaw instance) ──
 
@@ -134,7 +80,7 @@ export function readRuns(cronDir: string): CronRun[] {
 
 // ── Transform to Supabase rows ──
 
-function toSupabaseJob(job: CronJob, instId: string, userId: string | null): SupabaseCronJob {
+function toSupabaseJob(job: CronJob, instId: string): SupabaseCronJob {
   const now = new Date().toISOString();
   return {
     id: job.id,
@@ -172,11 +118,11 @@ function toSupabaseJob(job: CronJob, instId: string, userId: string | null): Sup
       ? new Date(job.updatedAtMs).toISOString()
       : null,
     synced_at: now,
-    user_id: userId,
+    user_id: null,
   };
 }
 
-function toSupabaseRun(run: CronRun, instId: string, userId: string | null): SupabaseCronRun {
+function toSupabaseRun(run: CronRun, instId: string): SupabaseCronRun {
   const now = new Date().toISOString();
   // Use ts + jobId as a deterministic ID to avoid duplicates
   const id = `${run.jobId}-${run.ts}`;
@@ -199,27 +145,25 @@ function toSupabaseRun(run: CronRun, instId: string, userId: string | null): Sup
     output_tokens: run.usage?.output_tokens ?? null,
     total_tokens: run.usage?.total_tokens ?? null,
     synced_at: now,
-    user_id: userId,
+    user_id: null,
   };
 }
 
 // ── Supabase REST client (no SDK dependency — just fetch) ──
 
 async function supabaseUpsert(
-  url: string,
-  key: string,
   table: string,
   rows: Record<string, unknown>[],
-  conflictColumn: string = "id"
+  _conflictColumn: string = "id"
 ): Promise<{ ok: boolean; error?: string }> {
   if (rows.length === 0) return { ok: true };
 
   try {
-    const resp = await fetch(`${url}/rest/v1/${table}`, {
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
       method: "POST",
       headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
         "Content-Type": "application/json",
         Prefer: `resolution=merge-duplicates,return=minimal`,
       },
@@ -242,22 +186,16 @@ async function supabaseUpsert(
 // ── Delete orphaned jobs from Supabase (cron_runs history is preserved) ──
 
 async function supabaseDeleteOrphans(
-  url: string,
-  key: string,
   instId: string,
-  localIds: Set<string>,
-  userId: string | null
+  localIds: Set<string>
 ): Promise<{ ok: boolean; deleted?: number; error?: string }> {
   try {
     // Fetch job IDs for this instance from Supabase
-    let fetchUrl = `${url}/rest/v1/cron_jobs?instance_id=eq.${encodeURIComponent(instId)}&select=id`;
-    if (userId) {
-      fetchUrl += `&user_id=eq.${encodeURIComponent(userId)}`;
-    }
+    const fetchUrl = `${SUPABASE_URL}/rest/v1/cron_jobs?instance_id=eq.${encodeURIComponent(instId)}&select=id`;
     const resp = await fetch(fetchUrl, {
       headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
       },
     });
     if (!resp.ok) {
@@ -271,12 +209,12 @@ async function supabaseDeleteOrphans(
     // Hard delete orphaned jobs (cron_runs has no FK cascade, history preserved)
     const idsParam = orphanIds.map((id) => `"${id}"`).join(",");
     const delResp = await fetch(
-      `${url}/rest/v1/cron_jobs?id=in.(${idsParam})`,
+      `${SUPABASE_URL}/rest/v1/cron_jobs?id=in.(${idsParam})`,
       {
         method: "DELETE",
         headers: {
-          apikey: key,
-          Authorization: `Bearer ${key}`,
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
           Prefer: "return=minimal",
         },
       }
@@ -295,29 +233,8 @@ async function supabaseDeleteOrphans(
 
 export async function syncToSupabase(
   cronDir: string,
-  config: RondoPluginConfig,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<void> {
-  const { supabaseUrl, supabaseKey, userId, supabaseAuthEmail } = config;
-  if (!supabaseUrl || !supabaseKey) {
-    logger.warn("[rondo] Supabase not configured — skipping sync");
-    return;
-  }
-
-  // Resolve user_id: prefer explicit userId, then auto-resolve from auth email
-  let resolvedUserId = userId;
-  if (!resolvedUserId && supabaseAuthEmail) {
-    const authUid = await resolveAuthUserId(supabaseUrl, supabaseKey, supabaseAuthEmail, logger);
-    if (authUid) {
-      resolvedUserId = authUid;
-      logger.info(`[rondo] Resolved auth email "${supabaseAuthEmail}" → user_id ${authUid}`);
-    }
-  }
-
-  if (!resolvedUserId) {
-    logger.warn("[rondo] No user_id configured (set supabaseAuthEmail or RONDO_USER_ID) — sync may fail with RLS");
-  }
-
   const instId = getInstanceId(cronDir);
   const jobs = readJobs(cronDir);
   const runs = readRuns(cronDir);
@@ -327,11 +244,8 @@ export async function syncToSupabase(
   );
 
   // ── Upsert jobs ──
-  const uid = resolvedUserId ?? null;
-  const jobRows = jobs.map((j) => toSupabaseJob(j, instId, uid));
+  const jobRows = jobs.map((j) => toSupabaseJob(j, instId));
   const jobResult = await supabaseUpsert(
-    supabaseUrl,
-    supabaseKey,
     "cron_jobs",
     jobRows as unknown as Record<string, unknown>[]
   );
@@ -342,13 +256,7 @@ export async function syncToSupabase(
   // ── Delete orphaned jobs (not in local jobs.json; run history preserved) ──
   if (jobResult.ok) {
     const localJobIds = new Set(jobs.map((j) => j.id));
-    const delResult = await supabaseDeleteOrphans(
-      supabaseUrl,
-      supabaseKey,
-      instId,
-      localJobIds,
-      uid
-    );
+    const delResult = await supabaseDeleteOrphans(instId, localJobIds);
     if (!delResult.ok) {
       logger.warn(`[rondo] Failed to delete orphaned jobs: ${delResult.error}`);
     } else if (delResult.deleted) {
@@ -357,13 +265,11 @@ export async function syncToSupabase(
   }
 
   // ── Upsert runs in batches ──
-  const runRows = runs.map((r) => toSupabaseRun(r, instId, uid));
+  const runRows = runs.map((r) => toSupabaseRun(r, instId));
   let runErrors = 0;
   for (let i = 0; i < runRows.length; i += SUPABASE_BATCH_SIZE) {
     const batch = runRows.slice(i, i + SUPABASE_BATCH_SIZE);
     const result = await supabaseUpsert(
-      supabaseUrl,
-      supabaseKey,
       "cron_runs",
       batch as unknown as Record<string, unknown>[]
     );
