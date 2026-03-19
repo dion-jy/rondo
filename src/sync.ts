@@ -10,6 +10,59 @@ import type {
 } from "./types.js";
 import { SUPABASE_BATCH_SIZE } from "./config.js";
 
+// ── Resolve Supabase Auth email → UUID ──
+
+let cachedAuthUid: string | null = null;
+let cachedAuthEmail: string | null = null;
+
+async function resolveAuthUserId(
+  url: string,
+  key: string,
+  email: string,
+  logger: { warn: (msg: string) => void }
+): Promise<string | null> {
+  // Return cached value if email hasn't changed
+  if (cachedAuthEmail === email && cachedAuthUid) return cachedAuthUid;
+
+  try {
+    const resp = await fetch(`${url}/auth/v1/admin/users?page=1&per_page=100`, {
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+      },
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      logger.warn(`[rondo] Failed to resolve auth email (HTTP ${resp.status}): ${body}`);
+      return null;
+    }
+
+    const data = await resp.json();
+    const users: { id: string; email?: string }[] = data.users ?? data;
+    const match = users.find(
+      (u) => u.email?.toLowerCase() === email.toLowerCase()
+    );
+
+    if (!match) {
+      logger.warn(
+        `[rondo] No Supabase Auth user found for email "${email}". ` +
+        `Make sure this email has logged in via the Rondo UI at least once.`
+      );
+      return null;
+    }
+
+    cachedAuthEmail = email;
+    cachedAuthUid = match.id;
+    return match.id;
+  } catch (err) {
+    logger.warn(
+      `[rondo] Error resolving auth email: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return null;
+  }
+}
+
 // ── Instance ID (stable per gateway boot, identifies this OpenClaw instance) ──
 
 let instanceId: string | undefined;
@@ -245,14 +298,24 @@ export async function syncToSupabase(
   config: RondoPluginConfig,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<void> {
-  const { supabaseUrl, supabaseKey, userId } = config;
+  const { supabaseUrl, supabaseKey, userId, supabaseAuthEmail } = config;
   if (!supabaseUrl || !supabaseKey) {
     logger.warn("[rondo] Supabase not configured — skipping sync");
     return;
   }
 
-  if (!userId) {
-    logger.warn("[rondo] No user_id configured (set RONDO_USER_ID) — sync may fail with RLS");
+  // Resolve user_id: prefer explicit userId, then auto-resolve from auth email
+  let resolvedUserId = userId;
+  if (!resolvedUserId && supabaseAuthEmail) {
+    const authUid = await resolveAuthUserId(supabaseUrl, supabaseKey, supabaseAuthEmail, logger);
+    if (authUid) {
+      resolvedUserId = authUid;
+      logger.info(`[rondo] Resolved auth email "${supabaseAuthEmail}" → user_id ${authUid}`);
+    }
+  }
+
+  if (!resolvedUserId) {
+    logger.warn("[rondo] No user_id configured (set supabaseAuthEmail or RONDO_USER_ID) — sync may fail with RLS");
   }
 
   const instId = getInstanceId(cronDir);
@@ -264,7 +327,7 @@ export async function syncToSupabase(
   );
 
   // ── Upsert jobs ──
-  const uid = userId ?? null;
+  const uid = resolvedUserId ?? null;
   const jobRows = jobs.map((j) => toSupabaseJob(j, instId, uid));
   const jobResult = await supabaseUpsert(
     supabaseUrl,

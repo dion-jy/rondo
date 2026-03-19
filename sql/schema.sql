@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   consecutive_errors INTEGER NOT NULL DEFAULT 0,
   is_running        BOOLEAN NOT NULL DEFAULT false,
 
+  -- Multi-user
+  user_id           UUID,
+
   -- Metadata
   created_at        TIMESTAMPTZ,
   updated_at        TIMESTAMPTZ,
@@ -48,6 +51,8 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_instance
   ON cron_jobs (instance_id);
 CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled
   ON cron_jobs (instance_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_cron_jobs_user
+  ON cron_jobs (user_id);
 
 -- ── cron_runs ──────────────────────────────────────────────────────────
 
@@ -78,6 +83,9 @@ CREATE TABLE IF NOT EXISTS cron_runs (
   output_tokens     INTEGER,
   total_tokens      INTEGER,
 
+  -- Multi-user
+  user_id           UUID,
+
   -- Metadata
   synced_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -93,25 +101,34 @@ CREATE INDEX IF NOT EXISTS idx_cron_runs_timestamp
   ON cron_runs (instance_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_cron_runs_status
   ON cron_runs (instance_id, status);
+CREATE INDEX IF NOT EXISTS idx_cron_runs_user
+  ON cron_runs (user_id);
 
 -- ── RLS (Row Level Security) ──────────────────────────────────────────
--- Enable RLS for future multi-user support.
--- For now, allow all access via anon key.
--- TODO: Add proper user-based policies when auth is implemented.
+-- Plugin uses service_role key → bypasses RLS for writes.
+-- UI uses anon key + user JWT → auth.uid() filters reads.
 
 ALTER TABLE cron_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cron_runs ENABLE ROW LEVEL SECURITY;
 
--- Temporary: allow all operations for authenticated and anon users
-CREATE POLICY "Allow all access to cron_jobs"
-  ON cron_jobs FOR ALL
-  USING (true)
-  WITH CHECK (true);
+-- Authenticated users see only their own data
+CREATE POLICY "Users can view own jobs"
+  ON cron_jobs FOR SELECT
+  USING (auth.uid() = user_id);
 
-CREATE POLICY "Allow all access to cron_runs"
+CREATE POLICY "Service role can manage all jobs"
+  ON cron_jobs FOR ALL
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
+
+CREATE POLICY "Users can view own runs"
+  ON cron_runs FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Service role can manage all runs"
   ON cron_runs FOR ALL
-  USING (true)
-  WITH CHECK (true);
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
 
 -- ── Views (convenience) ──────────────────────────────────────────────
 

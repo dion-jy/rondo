@@ -17,6 +17,8 @@ const plugin = {
         supabaseUrl: { type: "string" },
         supabaseKey: { type: "string" },
         syncIntervalMs: { type: "number", default: 300000 },
+        userId: { type: "string" },
+        supabaseAuthEmail: { type: "string" },
       },
     },
   },

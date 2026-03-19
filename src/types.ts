@@ -139,4 +139,5 @@ export interface RondoPluginConfig {
   supabaseKey?: string;
   syncIntervalMs?: number;
   userId?: string;
+  supabaseAuthEmail?: string;
 }
