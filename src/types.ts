@@ -108,6 +108,7 @@ export interface SupabaseCronJob {
   updated_at: string | null;
   synced_at: string;
   user_id: string | null;
+  plugin_version: string | null;
 }
 
 export interface SupabaseCronRun {

@@ -10,6 +10,25 @@ import type {
   SupabaseAcpSession,
 } from "./types.js";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_BATCH_SIZE } from "./config.js";
+import { readFileSync as readFileSyncPkg } from "fs";
+import { join as joinPkg } from "path";
+import { fileURLToPath } from "url";
+
+// ── Plugin version (read from own package.json) ──
+
+let pluginVersion: string | null = null;
+
+function getPluginVersion(): string | null {
+  if (pluginVersion !== null) return pluginVersion;
+  try {
+    const pkgPath = joinPkg(fileURLToPath(import.meta.url), "..", "..", "package.json");
+    const pkg = JSON.parse(readFileSyncPkg(pkgPath, "utf-8"));
+    pluginVersion = pkg.version ?? null;
+  } catch {
+    pluginVersion = null;
+  }
+  return pluginVersion;
+}
 
 // ── Instance ID (stable per gateway boot, identifies this OpenClaw instance) ──
 
@@ -217,6 +236,7 @@ function toSupabaseJob(job: CronJob, instId: string, userId: string | null = nul
       : null,
     synced_at: now,
     user_id: userId,
+    plugin_version: getPluginVersion(),
   };
 }
 
