@@ -554,12 +554,18 @@ export async function syncToSupabase(
 ): Promise<void> {
   const instId = getInstanceId(cronDir);
   const userId = resolveUserId(cronDir);
+
+  if (!userId) {
+    logger.warn("[rondo] No userId linked; skipping sync to avoid unscoped data.");
+    return;
+  }
+
   const jobs = readJobs(cronDir);
   const runs = readRuns(cronDir);
   const sessions = readSessions(cronDir);
 
   logger.info(
-    `[rondo] Syncing ${jobs.length} jobs + ${runs.length} runs + ${sessions.length} sessions to Supabase`
+    `[rondo] Syncing ${jobs.length} jobs + ${runs.length} runs + ${sessions.length} sessions to Supabase (user=${userId})`
   );
 
   // ── Upsert jobs ──
