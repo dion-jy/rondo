@@ -18,6 +18,5 @@ export function resolveConfig(pluginConfig?: Record<string, unknown>): RondoPlug
 
   return {
     syncIntervalMs: cfg.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS,
-    linkToken: typeof cfg.linkToken === "string" ? cfg.linkToken : undefined,
   };
 }

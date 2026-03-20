@@ -43,7 +43,7 @@ function getUserIdPath(cronDir: string): string {
   return join(cronDir, "..", ".rondo-user-id");
 }
 
-function getSavedUserId(cronDir: string): string | null {
+export function getSavedUserId(cronDir: string): string | null {
   const idPath = getUserIdPath(cronDir);
   try {
     if (existsSync(idPath)) {
@@ -56,7 +56,7 @@ function getSavedUserId(cronDir: string): string | null {
   return null;
 }
 
-function saveUserId(cronDir: string, userId: string): void {
+export function saveUserId(cronDir: string, userId: string): void {
   try {
     writeFileSync(getUserIdPath(cronDir), userId, "utf-8");
   } catch {
@@ -68,7 +68,7 @@ function saveUserId(cronDir: string, userId: string): void {
  * Claim a one-time link token from Supabase device_links table.
  * Returns the user_id if successful, null otherwise.
  */
-async function claimLinkToken(
+export async function claimLinkToken(
   token: string,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<string | null> {
@@ -127,27 +127,11 @@ async function claimLinkToken(
 }
 
 /**
- * Resolve user_id: check saved file first, then try claiming a link token if provided.
+ * Resolve user_id from saved .rondo-user-id file.
+ * Linking is now handled by the /rondo link chat command.
  */
-export async function resolveUserId(
-  cronDir: string,
-  linkToken: string | undefined,
-  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
-): Promise<string | null> {
-  // 1. Check saved user ID
-  const saved = getSavedUserId(cronDir);
-  if (saved) return saved;
-
-  // 2. Try claiming link token
-  if (linkToken) {
-    const userId = await claimLinkToken(linkToken, logger);
-    if (userId) {
-      saveUserId(cronDir, userId);
-      return userId;
-    }
-  }
-
-  return null;
+export function resolveUserId(cronDir: string): string | null {
+  return getSavedUserId(cronDir);
 }
 
 // ── Read local cron data ──
@@ -566,11 +550,10 @@ async function supabaseDeleteOrphans(
 
 export async function syncToSupabase(
   cronDir: string,
-  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
-  options?: { linkToken?: string }
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<void> {
   const instId = getInstanceId(cronDir);
-  const userId = await resolveUserId(cronDir, options?.linkToken, logger);
+  const userId = resolveUserId(cronDir);
   const jobs = readJobs(cronDir);
   const runs = readRuns(cronDir);
   const sessions = readSessions(cronDir);

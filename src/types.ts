@@ -167,5 +167,4 @@ export interface SupabaseAcpSession {
 
 export interface RondoPluginConfig {
   syncIntervalMs?: number;
-  linkToken?: string;
 }
