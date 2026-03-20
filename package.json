@@ -1,6 +1,6 @@
 {
   "name": "@dion-jy/rondo",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "main": "index.ts",
   "description": "OpenClaw plugin — syncs cron job/run data to Supabase for external dashboard",
