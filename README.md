@@ -61,6 +61,22 @@ No inbound ports, no tunnels — outbound HTTPS only.
 | `syncIntervalMs` | `300000` (5 min) | Sync interval in milliseconds |
 | `linkToken` | — | One-time device link token from Rondo UI |
 
+## Automated Publishing
+
+The package is automatically published to npm when:
+
+- **Option A:** A GitHub Release is published
+- **Option B:** A tag matching `v*` is pushed (e.g. `git tag v2.2.0 && git push --tags`)
+
+### Setup
+
+Add an `NPM_TOKEN` repository secret (Settings → Secrets → Actions):
+
+1. Create a granular access token on [npmjs.com](https://www.npmjs.com/settings/~/tokens) with **publish** permission for `@dion-jy/rondo`
+2. Add it as `NPM_TOKEN` in the repo's Actions secrets
+
+The workflow validates the package name and checks that the tag version matches `package.json` before publishing. If the version is already published, the job exits gracefully.
+
 ## Related
 
 - [Rondo UI](https://github.com/dion-jy/rondo-ui) — Vercel dashboard for monitoring
