@@ -132,8 +132,40 @@ export interface SupabaseCronRun {
   user_id: string | null;
 }
 
+// ── ACP Session Types ──
+
+export interface AcpSessionInfo {
+  key: string;
+  label: string;
+  agent: string;
+  model: string | null;
+  status: string;
+  started_at: string;
+  updated_at: string;
+  summary: string | null;
+  tokens: number | null;
+  duration_ms: number | null;
+}
+
+export interface SupabaseAcpSession {
+  key: string;
+  label: string | null;
+  agent: string | null;
+  model: string | null;
+  status: string | null;
+  started_at: string | null;
+  updated_at: string | null;
+  summary: string | null;
+  tokens: number | null;
+  duration_ms: number | null;
+  instance_id: string;
+  user_id: string | null;
+  synced_at: string;
+}
+
 // ── Plugin Config ──
 
 export interface RondoPluginConfig {
   syncIntervalMs?: number;
+  linkToken?: string;
 }

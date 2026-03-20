@@ -15,6 +15,7 @@ const plugin = {
       additionalProperties: false,
       properties: {
         syncIntervalMs: { type: "number", default: 300000 },
+        linkToken: { type: "string", description: "One-time token from Rondo web to link this device to your account" },
       },
     },
   },
@@ -41,10 +42,12 @@ const plugin = {
           `[rondo] Service started — sync every ${Math.round(interval / 1000)}s (cronDir=${cronDir})`
         );
 
+        const syncOpts = { linkToken: config.linkToken };
+
         // Initial sync after a short delay (let gateway finish startup)
         const initialDelay = setTimeout(async () => {
           try {
-            await syncToSupabase(cronDir, ctx.logger);
+            await syncToSupabase(cronDir, ctx.logger, syncOpts);
           } catch (err) {
             ctx.logger.error(
               `[rondo] Initial sync error: ${err instanceof Error ? err.message : String(err)}`
@@ -55,7 +58,7 @@ const plugin = {
         // Periodic sync
         const timer = setInterval(async () => {
           try {
-            await syncToSupabase(cronDir, ctx.logger);
+            await syncToSupabase(cronDir, ctx.logger, syncOpts);
           } catch (err) {
             ctx.logger.error(
               `[rondo] Sync error: ${err instanceof Error ? err.message : String(err)}`

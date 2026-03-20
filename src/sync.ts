@@ -1,11 +1,13 @@
-import { readFileSync, readdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, readdirSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import type {
   CronJob,
   CronRun,
+  AcpSessionInfo,
   SupabaseCronJob,
   SupabaseCronRun,
+  SupabaseAcpSession,
 } from "./types.js";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_BATCH_SIZE } from "./config.js";
 
@@ -27,13 +29,125 @@ function getInstanceId(cronDir: string): string {
   if (!instanceId) {
     instanceId = randomUUID();
     try {
-      const { writeFileSync } = require("fs");
       writeFileSync(idPath, instanceId, "utf-8");
     } catch {
       // non-critical — will regenerate on next boot
     }
   }
   return instanceId;
+}
+
+// ── User ID (resolved from device link token) ──
+
+function getUserIdPath(cronDir: string): string {
+  return join(cronDir, "..", ".rondo-user-id");
+}
+
+function getSavedUserId(cronDir: string): string | null {
+  const idPath = getUserIdPath(cronDir);
+  try {
+    if (existsSync(idPath)) {
+      const id = readFileSync(idPath, "utf-8").trim();
+      if (id) return id;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function saveUserId(cronDir: string, userId: string): void {
+  try {
+    writeFileSync(getUserIdPath(cronDir), userId, "utf-8");
+  } catch {
+    // non-critical
+  }
+}
+
+/**
+ * Claim a one-time link token from Supabase device_links table.
+ * Returns the user_id if successful, null otherwise.
+ */
+async function claimLinkToken(
+  token: string,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+): Promise<string | null> {
+  try {
+    // Read the token (anon can read unused, non-expired tokens per RLS)
+    const readResp = await fetch(
+      `${SUPABASE_URL}/rest/v1/device_links?token=eq.${encodeURIComponent(token)}&select=user_id,used`,
+      {
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+      }
+    );
+    if (!readResp.ok) {
+      logger.warn(`[rondo] Failed to read link token: HTTP ${readResp.status}`);
+      return null;
+    }
+    const rows: { user_id: string; used: boolean }[] = await readResp.json();
+    if (rows.length === 0) {
+      logger.warn("[rondo] Link token not found or expired");
+      return null;
+    }
+    if (rows[0].used) {
+      logger.warn("[rondo] Link token already used");
+      return null;
+    }
+
+    const userId = rows[0].user_id;
+
+    // Mark the token as used (anon can update unused, non-expired tokens per RLS)
+    const updateResp = await fetch(
+      `${SUPABASE_URL}/rest/v1/device_links?token=eq.${encodeURIComponent(token)}`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal",
+        },
+        body: JSON.stringify({ used: true, used_at: new Date().toISOString() }),
+      }
+    );
+    if (!updateResp.ok) {
+      logger.warn(`[rondo] Failed to mark token as used: HTTP ${updateResp.status}`);
+      // Still return userId — the token was valid
+    }
+
+    logger.info(`[rondo] Device linked successfully (user_id=${userId})`);
+    return userId;
+  } catch (err) {
+    logger.error(`[rondo] Error claiming link token: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Resolve user_id: check saved file first, then try claiming a link token if provided.
+ */
+export async function resolveUserId(
+  cronDir: string,
+  linkToken: string | undefined,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+): Promise<string | null> {
+  // 1. Check saved user ID
+  const saved = getSavedUserId(cronDir);
+  if (saved) return saved;
+
+  // 2. Try claiming link token
+  if (linkToken) {
+    const userId = await claimLinkToken(linkToken, logger);
+    if (userId) {
+      saveUserId(cronDir, userId);
+      return userId;
+    }
+  }
+
+  return null;
 }
 
 // ── Read local cron data ──
@@ -80,7 +194,7 @@ export function readRuns(cronDir: string): CronRun[] {
 
 // ── Transform to Supabase rows ──
 
-function toSupabaseJob(job: CronJob, instId: string): SupabaseCronJob {
+function toSupabaseJob(job: CronJob, instId: string, userId: string | null = null): SupabaseCronJob {
   const now = new Date().toISOString();
   return {
     id: job.id,
@@ -118,11 +232,11 @@ function toSupabaseJob(job: CronJob, instId: string): SupabaseCronJob {
       ? new Date(job.updatedAtMs).toISOString()
       : null,
     synced_at: now,
-    user_id: null,
+    user_id: userId,
   };
 }
 
-function toSupabaseRun(run: CronRun, instId: string): SupabaseCronRun {
+function toSupabaseRun(run: CronRun, instId: string, userId: string | null = null): SupabaseCronRun {
   const now = new Date().toISOString();
   // Use ts + jobId as a deterministic ID to avoid duplicates
   const id = `${run.jobId}-${run.ts}`;
@@ -145,7 +259,7 @@ function toSupabaseRun(run: CronRun, instId: string): SupabaseCronRun {
     output_tokens: run.usage?.output_tokens ?? null,
     total_tokens: run.usage?.total_tokens ?? null,
     synced_at: now,
-    user_id: null,
+    user_id: userId,
   };
 }
 
@@ -181,6 +295,225 @@ async function supabaseUpsert(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+// ── Read ACP session data ──
+
+function getSessionsDir(cronDir: string): string {
+  return join(cronDir, "..", "agents", "claude", "sessions");
+}
+
+/**
+ * Read head (first N bytes) and tail (last N bytes) of a file efficiently.
+ * Avoids reading entire large session files into memory.
+ */
+function readHeadAndTail(filePath: string, headBytes = 16384, tailBytes = 8192): { head: string; tail: string } {
+  try {
+    const stat = statSync(filePath);
+    const size = stat.size;
+
+    if (size <= headBytes + tailBytes) {
+      const full = readFileSync(filePath, "utf-8");
+      return { head: full, tail: full };
+    }
+
+    const fd = openSync(filePath, "r");
+    try {
+      // Read head
+      const headBuf = Buffer.alloc(headBytes);
+      readSync(fd, headBuf, 0, headBytes, 0);
+      const head = headBuf.toString("utf-8");
+
+      // Read tail
+      const tailBuf = Buffer.alloc(tailBytes);
+      readSync(fd, tailBuf, 0, tailBytes, size - tailBytes);
+      const tail = tailBuf.toString("utf-8");
+
+      return { head, tail };
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return { head: "", tail: "" };
+  }
+}
+
+function parseSessionLabel(firstUserContent: string): string {
+  if (!firstUserContent) return "Untitled session";
+  // Strip timestamp prefix like [Wed 2026-03-18 23:24 GMT+9]
+  const cleaned = firstUserContent.replace(/^\[.*?\]\s*/, "");
+  // Look for ## heading first
+  const headingMatch = cleaned.match(/^#+\s+(.+)$/m);
+  if (headingMatch) return headingMatch[1].trim().slice(0, 100);
+  // Otherwise take first line
+  const firstLine = cleaned.split("\n")[0].trim();
+  return firstLine.slice(0, 100) || "Untitled session";
+}
+
+function extractMessageContent(msg: any): string {
+  if (!msg?.message?.content) return "";
+  const content = msg.message.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const textBlock = content.find((b: any) => b.type === "text");
+    return textBlock?.text ?? "";
+  }
+  return "";
+}
+
+export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): AcpSessionInfo[] {
+  const sessDir = getSessionsDir(cronDir);
+  if (!existsSync(sessDir)) return [];
+
+  const now = Date.now();
+  const sessions: AcpSessionInfo[] = [];
+
+  let files: string[];
+  try {
+    files = readdirSync(sessDir).filter(
+      (f) => f.endsWith(".jsonl") && !f.includes(".acp-stream.")
+    );
+  } catch {
+    return [];
+  }
+
+  for (const file of files) {
+    const filePath = join(sessDir, file);
+    let stat;
+    try {
+      stat = statSync(filePath);
+    } catch {
+      continue;
+    }
+
+    // Only sync sessions modified within maxAgeMs
+    if (now - stat.mtimeMs > maxAgeMs) continue;
+
+    const { head, tail } = readHeadAndTail(filePath);
+    if (!head) continue;
+
+    const headLines = head.split("\n").filter(Boolean);
+    const tailLines = tail.split("\n").filter(Boolean);
+
+    // Parse session header (first line)
+    let sessionHeader: any;
+    try {
+      sessionHeader = JSON.parse(headLines[0]);
+    } catch {
+      continue;
+    }
+    if (sessionHeader?.type !== "session") continue;
+
+    const sessionId = sessionHeader.id ?? file.replace(".jsonl", "");
+    const startedAt = sessionHeader.timestamp;
+
+    // Find first user message for label
+    // Try JSON parsing first; fall back to regex extraction for truncated lines
+    let label = "Untitled session";
+    for (let i = 1; i < headLines.length; i++) {
+      const line = headLines[i];
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed?.type === "message" && parsed?.message?.role === "user") {
+          label = parseSessionLabel(extractMessageContent(parsed));
+          break;
+        }
+      } catch {
+        // Line may be truncated — try regex extraction for user messages
+        if (line.includes('"role":"user"') && line.includes('"content":')) {
+          const contentMatch = line.match(/"content":"((?:[^"\\]|\\.)*)/)
+            ?? line.match(/"content":\s*"((?:[^"\\]|\\.)*)/);
+          if (contentMatch) {
+            const raw = contentMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
+            label = parseSessionLabel(raw);
+            break;
+          }
+        }
+        continue;
+      }
+    }
+
+    // Find last assistant message for summary/model/usage
+    let lastAssistantMsg: any = null;
+    let lastTimestamp = startedAt;
+    for (let i = tailLines.length - 1; i >= 0; i--) {
+      try {
+        const parsed = JSON.parse(tailLines[i]);
+        if (parsed?.timestamp) lastTimestamp = parsed.timestamp;
+        if (parsed?.type === "message" && parsed?.message?.role === "assistant" && !lastAssistantMsg) {
+          lastAssistantMsg = parsed;
+        }
+        if (lastAssistantMsg && lastTimestamp !== startedAt) break;
+      } catch {
+        continue;
+      }
+    }
+
+    // Determine status
+    const fileAgeSec = (now - stat.mtimeMs) / 1000;
+    let status: string;
+    if (fileAgeSec < 300) {
+      status = "running";
+    } else if (lastAssistantMsg?.message?.stopReason === "stop") {
+      status = "completed";
+    } else {
+      status = "idle";
+    }
+
+    // Extract summary from last assistant message
+    let summary: string | null = null;
+    if (lastAssistantMsg) {
+      const text = extractMessageContent(lastAssistantMsg);
+      summary = text ? text.slice(0, 200) : null;
+    }
+
+    // Extract model and tokens
+    const model = lastAssistantMsg?.message?.model ?? null;
+    const usage = lastAssistantMsg?.message?.usage;
+    const tokens = usage?.totalTokens ?? usage?.total_tokens ?? null;
+
+    // Duration
+    const startMs = new Date(startedAt).getTime();
+    const endMs = new Date(lastTimestamp).getTime();
+    const durationMs = endMs > startMs ? endMs - startMs : null;
+
+    sessions.push({
+      key: sessionId,
+      label,
+      agent: "claude",
+      model,
+      status,
+      started_at: startedAt,
+      updated_at: lastTimestamp,
+      summary,
+      tokens: typeof tokens === "number" ? tokens : null,
+      duration_ms: durationMs,
+    });
+  }
+
+  return sessions;
+}
+
+function toSupabaseSession(
+  session: AcpSessionInfo,
+  instId: string,
+  userId: string | null = null
+): SupabaseAcpSession {
+  return {
+    key: session.key,
+    label: session.label,
+    agent: session.agent,
+    model: session.model,
+    status: session.status,
+    started_at: session.started_at,
+    updated_at: session.updated_at,
+    summary: session.summary,
+    tokens: session.tokens,
+    duration_ms: session.duration_ms,
+    instance_id: instId,
+    user_id: userId,
+    synced_at: new Date().toISOString(),
+  };
 }
 
 // ── Delete orphaned jobs from Supabase (cron_runs history is preserved) ──
@@ -233,18 +566,21 @@ async function supabaseDeleteOrphans(
 
 export async function syncToSupabase(
   cronDir: string,
-  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
+  options?: { linkToken?: string }
 ): Promise<void> {
   const instId = getInstanceId(cronDir);
+  const userId = await resolveUserId(cronDir, options?.linkToken, logger);
   const jobs = readJobs(cronDir);
   const runs = readRuns(cronDir);
+  const sessions = readSessions(cronDir);
 
   logger.info(
-    `[rondo] Syncing ${jobs.length} jobs + ${runs.length} runs to Supabase`
+    `[rondo] Syncing ${jobs.length} jobs + ${runs.length} runs + ${sessions.length} sessions to Supabase`
   );
 
   // ── Upsert jobs ──
-  const jobRows = jobs.map((j) => toSupabaseJob(j, instId));
+  const jobRows = jobs.map((j) => toSupabaseJob(j, instId, userId));
   const jobResult = await supabaseUpsert(
     "cron_jobs",
     jobRows as unknown as Record<string, unknown>[]
@@ -265,7 +601,7 @@ export async function syncToSupabase(
   }
 
   // ── Upsert runs in batches ──
-  const runRows = runs.map((r) => toSupabaseRun(r, instId));
+  const runRows = runs.map((r) => toSupabaseRun(r, instId, userId));
   let runErrors = 0;
   for (let i = 0; i < runRows.length; i += SUPABASE_BATCH_SIZE) {
     const batch = runRows.slice(i, i + SUPABASE_BATCH_SIZE);
@@ -279,7 +615,25 @@ export async function syncToSupabase(
     }
   }
 
-  if (runErrors === 0 && jobResult.ok) {
+  // ── Upsert ACP sessions ──
+  let sessionErrors = 0;
+  if (sessions.length > 0) {
+    const sessionRows = sessions.map((s) => toSupabaseSession(s, instId, userId));
+    for (let i = 0; i < sessionRows.length; i += SUPABASE_BATCH_SIZE) {
+      const batch = sessionRows.slice(i, i + SUPABASE_BATCH_SIZE);
+      const result = await supabaseUpsert(
+        "acp_sessions",
+        batch as unknown as Record<string, unknown>[],
+        "key"
+      );
+      if (!result.ok) {
+        logger.error(`[rondo] Failed to sync session batch: ${result.error}`);
+        sessionErrors++;
+      }
+    }
+  }
+
+  if (runErrors === 0 && jobResult.ok && sessionErrors === 0) {
     logger.info("[rondo] Sync completed successfully");
   }
 }
