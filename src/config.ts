@@ -4,7 +4,7 @@ import type { RondoPluginConfig } from "./types.js";
 
 export const SUPABASE_URL = "https://hjqwbrguuqoymljattef.supabase.co";
 export const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhqcXdicmd1dXFveW1samF0dGVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxNTA0NjIsImV4cCI6MjA4ODcyNjQ2Mn0.Q3FePoE0jVVBbfSEiR55YPy-b5kAblR8MZZCmxSxW-4";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhqcXdicmd1dXFveW1samF0dGVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxNTA0NjIsImV4cCI6MjA4ODcyNjQ2Mn0.rOmW5fRbsGm4itHlCN6N2_eM4t9E5QfCkiF2eEzuAsw";
 
 // ── Default configuration ──
 
