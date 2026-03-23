@@ -61,6 +61,29 @@ No inbound ports, no tunnels — outbound HTTPS only.
 | `syncIntervalMs` | `300000` (5 min) | Sync interval in milliseconds |
 | `linkToken` | — | One-time device link token from Rondo UI |
 
+## Zero-config install guarantee (important)
+
+Users should be able to install/update the plugin and use it immediately.
+
+- ✅ `SUPABASE_URL` and **anon** key are bundled in plugin source (`src/config.ts`)
+- ✅ No manual patching in runtime paths (e.g. `~/.openclaw/plugins/...`) should be required
+- ❌ Never ship `service_role` key in plugin code
+- ✅ Any key rotation must be released via npm version update, then users run plugin update
+
+### Security requirement: RLS
+
+Because anon key is public by design, Supabase **Row Level Security (RLS)** policies must enforce user-scoped access.
+Without proper RLS, anon clients may read/write unintended rows.
+
+### Maintainer release checklist
+
+1. Update `src/config.ts` (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) if rotated
+2. Confirm `service_role` is not referenced anywhere in source
+3. Validate RLS SQL is up to date (`sql/002_user_id_rls.sql`, `sql/003_enforce_user_scope.sql`)
+4. Bump `package.json` version
+5. Publish via release or tag (`v*`)
+6. Verify fresh install works without manual file edits
+
 ## Automated Publishing
 
 The package is automatically published to npm when:
