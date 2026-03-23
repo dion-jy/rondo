@@ -342,16 +342,29 @@ function readHeadAndTail(filePath: string, headBytes = 16384, tailBytes = 8192):
   }
 }
 
+const GENERIC_HEADINGS = new Set([
+  "목표", "서버", "배경", "실험", "주의사항", "구현", "코드", "설정", "참고",
+  "context", "background", "goal", "goals", "setup", "notes", "instructions",
+]);
+
 function parseSessionLabel(firstUserContent: string): string {
   if (!firstUserContent) return "Untitled session";
   // Strip timestamp prefix like [Wed 2026-03-18 23:24 GMT+9]
   const cleaned = firstUserContent.replace(/^\[.*?\]\s*/, "");
-  // Look for ## heading first
+
+  // 1. Look for "P{N} {Name}: {description}" project pattern first
+  const projectMatch = cleaned.match(/^P\d+[\s-]+\S+.*?[:：]\s*(.+)$/m);
+  if (projectMatch) return projectMatch[0].trim().slice(0, 100);
+
+  // 2. Use ## heading if it's not generic
   const headingMatch = cleaned.match(/^#+\s+(.+)$/m);
-  if (headingMatch) return headingMatch[1].trim().slice(0, 100);
-  // Otherwise take first line
-  const firstLine = cleaned.split("\n")[0].trim();
-  return firstLine.slice(0, 100) || "Untitled session";
+  if (headingMatch && !GENERIC_HEADINGS.has(headingMatch[1].trim().toLowerCase())) {
+    return headingMatch[1].trim().slice(0, 100);
+  }
+
+  // 3. Fallback: first non-heading, non-empty line
+  const lines = cleaned.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  return (lines[0] ?? "Untitled session").slice(0, 100);
 }
 
 function extractMessageContent(msg: any): string {
@@ -412,9 +425,9 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
     const startedAt = sessionHeader.timestamp;
 
     // Find first user message for label
-    // Try JSON parsing first; fall back to regex extraction for truncated lines
-    let label = "Untitled session";
-    for (let i = 1; i < headLines.length; i++) {
+    // Priority: sessionHeader.label > parsed from first user message
+    let label = sessionHeader.label ?? "";
+    if (!label) for (let i = 1; i < headLines.length; i++) {
       const line = headLines[i];
       try {
         const parsed = JSON.parse(line);
@@ -436,6 +449,7 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
         continue;
       }
     }
+    if (!label) label = "Untitled session";
 
     // Find last assistant message for summary/model/usage
     let lastAssistantMsg: any = null;
@@ -479,7 +493,7 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
     // Duration
     const startMs = new Date(startedAt).getTime();
     const endMs = new Date(lastTimestamp).getTime();
-    const durationMs = endMs > startMs ? endMs - startMs : null;
+    const durationMs = endMs > startMs ? Math.round(endMs - startMs) : null;
 
     sessions.push({
       key: sessionId,
@@ -490,7 +504,7 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
       started_at: startedAt,
       updated_at: lastTimestamp,
       summary,
-      tokens: typeof tokens === "number" ? tokens : null,
+      tokens: typeof tokens === "number" ? Math.round(tokens) : null,
       duration_ms: durationMs,
     });
   }
