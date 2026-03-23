@@ -54,6 +54,25 @@ OpenClaw plugin that syncs cron job data to [Rondo Dashboard](https://rondo-ui.v
 
 No inbound ports, no tunnels — outbound HTTPS only.
 
+## Upgrading
+
+If you are upgrading from an older version, run the following migration in your Supabase SQL Editor to add newer columns. These are idempotent and safe to re-run:
+
+```sql
+-- sql/004_plugin_version.sql
+ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS plugin_version text;
+```
+
+> **Note:** Even without running this migration, the plugin will work — it automatically detects missing columns and excludes them from sync payloads. Running the migration simply enables the extra metadata.
+
+### Upgrade steps
+
+1. `openclaw plugins update @dion-jy/rondo`
+2. `openclaw gateway restart`
+3. (Optional) Run the SQL above in Supabase to enable `plugin_version` tracking
+
+No manual file edits under `~/.openclaw/plugins/` are needed or supported.
+
 ## Configuration
 
 | Key | Default | Description |

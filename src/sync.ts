@@ -290,6 +290,53 @@ async function supabaseUpsert(
 
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
+
+      // PostgREST returns 400 + PGRST204 when a column doesn't exist.
+      // Strip the offending column and retry once so sync isn't blocked
+      // by schema mismatches (e.g. plugin_version not yet added).
+      if (resp.status === 400 && body.includes("PGRST204")) {
+        const colMatch = body.match(/column\s+(\w+)\s+.+?does not exist/i)
+          ?? body.match(/"column":"(\w+)"/);
+        if (colMatch) {
+          const badCol = colMatch[1];
+          const trimmedRows = rows.map((r) => {
+            const copy = { ...r };
+            delete copy[badCol];
+            return copy;
+          });
+          return supabaseUpsertOnce(table, trimmedRows);
+        }
+      }
+
+      return { ok: false, error: `HTTP ${resp.status}: ${body}` };
+    }
+    return { ok: true };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** Single-attempt upsert (no retry) used as fallback after column stripping. */
+async function supabaseUpsertOnce(
+  table: string,
+  rows: Record<string, unknown>[]
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: `resolution=merge-duplicates,return=minimal`,
+      },
+      body: JSON.stringify(rows),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
       return { ok: false, error: `HTTP ${resp.status}: ${body}` };
     }
     return { ok: true };
