@@ -509,8 +509,49 @@ async function supabaseUpsertOnce(
 
 // ── Read ACP session data ──
 
-function getSessionsDir(cronDir: string): string {
+interface AgentSessionsDir {
+  agent: string;
+  dir: string;
+}
+
+function getLegacyClaudeSessionsDir(cronDir: string): string {
   return join(cronDir, "..", "agents", "claude", "sessions");
+}
+
+function getAgentSessionsDirs(cronDir: string): AgentSessionsDir[] {
+  const agentsRootDir = join(cronDir, "..", "agents");
+  const sessionDirs: AgentSessionsDir[] = [];
+
+  try {
+    const agentEntries = readdirSync(agentsRootDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of agentEntries) {
+      const dir = join(agentsRootDir, entry.name, "sessions");
+      if (existsSync(dir)) {
+        sessionDirs.push({ agent: entry.name, dir });
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Backward-compatible fallback if only the legacy claude path exists.
+  if (sessionDirs.length === 0) {
+    const legacyClaudeDir = getLegacyClaudeSessionsDir(cronDir);
+    if (existsSync(legacyClaudeDir)) {
+      sessionDirs.push({ agent: "claude", dir: legacyClaudeDir });
+    }
+  }
+
+  return sessionDirs;
+}
+
+function inferSessionAgent(agent: string, sessionId: string): string {
+  if (agent) return agent;
+  const matchedAgent = sessionId.match(/^agent:([^:]+):/);
+  return matchedAgent?.[1] ?? "claude";
 }
 
 /**
@@ -585,134 +626,133 @@ function extractMessageContent(msg: any): string {
 }
 
 export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): AcpSessionInfo[] {
-  const sessDir = getSessionsDir(cronDir);
-  if (!existsSync(sessDir)) return [];
-
   const now = Date.now();
   const sessions: AcpSessionInfo[] = [];
 
-  let files: string[];
-  try {
-    files = readdirSync(sessDir).filter(
-      (f) => f.endsWith(".jsonl") && !f.includes(".acp-stream.")
-    );
-  } catch {
-    return [];
-  }
-
-  for (const file of files) {
-    const filePath = join(sessDir, file);
-    let stat;
+  for (const { agent, dir } of getAgentSessionsDirs(cronDir)) {
+    let files: string[];
     try {
-      stat = statSync(filePath);
+      files = readdirSync(dir).filter(
+        (f) => f.endsWith(".jsonl") && !f.includes(".acp-stream.")
+      );
     } catch {
       continue;
     }
 
-    // Only sync sessions modified within maxAgeMs
-    if (now - stat.mtimeMs > maxAgeMs) continue;
-
-    const { head, tail } = readHeadAndTail(filePath);
-    if (!head) continue;
-
-    const headLines = head.split("\n").filter(Boolean);
-    const tailLines = tail.split("\n").filter(Boolean);
-
-    // Parse session header (first line)
-    let sessionHeader: any;
-    try {
-      sessionHeader = JSON.parse(headLines[0]);
-    } catch {
-      continue;
-    }
-    if (sessionHeader?.type !== "session") continue;
-
-    const sessionId = sessionHeader.id ?? file.replace(".jsonl", "");
-    const startedAt = sessionHeader.timestamp;
-
-    // Find first user message for label
-    // Priority: sessionHeader.label > parsed from first user message
-    let label = sessionHeader.label ?? "";
-    if (!label) for (let i = 1; i < headLines.length; i++) {
-      const line = headLines[i];
+    for (const file of files) {
+      const filePath = join(dir, file);
+      let stat;
       try {
-        const parsed = JSON.parse(line);
-        if (parsed?.type === "message" && parsed?.message?.role === "user") {
-          label = parseSessionLabel(extractMessageContent(parsed));
-          break;
-        }
+        stat = statSync(filePath);
       } catch {
-        // Line may be truncated — try regex extraction for user messages
-        if (line.includes('"role":"user"') && line.includes('"content":')) {
-          const contentMatch = line.match(/"content":"((?:[^"\\]|\\.)*)/)
-            ?? line.match(/"content":\s*"((?:[^"\\]|\\.)*)/);
-          if (contentMatch) {
-            const raw = contentMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
-            label = parseSessionLabel(raw);
+        continue;
+      }
+
+      // Only sync sessions modified within maxAgeMs
+      if (now - stat.mtimeMs > maxAgeMs) continue;
+
+      const { head, tail } = readHeadAndTail(filePath);
+      if (!head) continue;
+
+      const headLines = head.split("\n").filter(Boolean);
+      const tailLines = tail.split("\n").filter(Boolean);
+
+      // Parse session header (first line)
+      let sessionHeader: any;
+      try {
+        sessionHeader = JSON.parse(headLines[0]);
+      } catch {
+        continue;
+      }
+      if (sessionHeader?.type !== "session") continue;
+
+      const sessionId = sessionHeader.id ?? file.replace(".jsonl", "");
+      const startedAt = sessionHeader.timestamp;
+
+      // Find first user message for label
+      // Priority: sessionHeader.label > parsed from first user message
+      let label = sessionHeader.label ?? "";
+      if (!label) for (let i = 1; i < headLines.length; i++) {
+        const line = headLines[i];
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed?.type === "message" && parsed?.message?.role === "user") {
+            label = parseSessionLabel(extractMessageContent(parsed));
             break;
           }
+        } catch {
+          // Line may be truncated — try regex extraction for user messages
+          if (line.includes('"role":"user"') && line.includes('"content":')) {
+            const contentMatch = line.match(/"content":"((?:[^"\\]|\\.)*)/)
+              ?? line.match(/"content":\s*"((?:[^"\\]|\\.)*)/);
+            if (contentMatch) {
+              const raw = contentMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
+              label = parseSessionLabel(raw);
+              break;
+            }
+          }
+          continue;
         }
-        continue;
       }
-    }
-    if (!label) label = "Untitled session";
+      if (!label) label = "Untitled session";
 
-    // Find last assistant message for summary/model/usage
-    let lastAssistantMsg: any = null;
-    let lastTimestamp = startedAt;
-    for (let i = tailLines.length - 1; i >= 0; i--) {
-      try {
-        const parsed = JSON.parse(tailLines[i]);
-        if (parsed?.timestamp) lastTimestamp = parsed.timestamp;
-        if (parsed?.type === "message" && parsed?.message?.role === "assistant" && !lastAssistantMsg) {
-          lastAssistantMsg = parsed;
+      // Find last assistant message for summary/model/usage
+      let lastAssistantMsg: any = null;
+      let lastTimestamp = startedAt;
+      for (let i = tailLines.length - 1; i >= 0; i--) {
+        try {
+          const parsed = JSON.parse(tailLines[i]);
+          if (parsed?.timestamp) lastTimestamp = parsed.timestamp;
+          if (parsed?.type === "message" && parsed?.message?.role === "assistant" && !lastAssistantMsg) {
+            lastAssistantMsg = parsed;
+          }
+          if (lastAssistantMsg && lastTimestamp !== startedAt) break;
+        } catch {
+          continue;
         }
-        if (lastAssistantMsg && lastTimestamp !== startedAt) break;
-      } catch {
-        continue;
       }
+
+      // Determine status
+      const fileAgeSec = (now - stat.mtimeMs) / 1000;
+      let status: string;
+      if (fileAgeSec < 300) {
+        status = "running";
+      } else if (lastAssistantMsg?.message?.stopReason === "stop") {
+        status = "completed";
+      } else {
+        status = "idle";
+      }
+
+      // Extract summary from last assistant message
+      let summary: string | null = null;
+      if (lastAssistantMsg) {
+        const text = extractMessageContent(lastAssistantMsg);
+        summary = text ? text.slice(0, 200) : null;
+      }
+
+      // Extract model and tokens
+      const model = lastAssistantMsg?.message?.model ?? null;
+      const usage = lastAssistantMsg?.message?.usage;
+      const tokens = usage?.totalTokens ?? usage?.total_tokens ?? null;
+
+      // Duration
+      const startMs = new Date(startedAt).getTime();
+      const endMs = new Date(lastTimestamp).getTime();
+      const durationMs = endMs > startMs ? Math.round(endMs - startMs) : null;
+
+      sessions.push({
+        key: sessionId,
+        label,
+        agent: inferSessionAgent(agent, sessionId),
+        model,
+        status,
+        started_at: startedAt,
+        updated_at: lastTimestamp,
+        summary,
+        tokens: typeof tokens === "number" ? Math.round(tokens) : null,
+        duration_ms: durationMs,
+      });
     }
-
-    // Determine status
-    const fileAgeSec = (now - stat.mtimeMs) / 1000;
-    let status: string;
-    if (fileAgeSec < 300) {
-      status = "running";
-    } else if (lastAssistantMsg?.message?.stopReason === "stop") {
-      status = "completed";
-    } else {
-      status = "idle";
-    }
-
-    // Extract summary from last assistant message
-    let summary: string | null = null;
-    if (lastAssistantMsg) {
-      const text = extractMessageContent(lastAssistantMsg);
-      summary = text ? text.slice(0, 200) : null;
-    }
-
-    // Extract model and tokens
-    const model = lastAssistantMsg?.message?.model ?? null;
-    const usage = lastAssistantMsg?.message?.usage;
-    const tokens = usage?.totalTokens ?? usage?.total_tokens ?? null;
-
-    // Duration
-    const startMs = new Date(startedAt).getTime();
-    const endMs = new Date(lastTimestamp).getTime();
-    const durationMs = endMs > startMs ? Math.round(endMs - startMs) : null;
-
-    sessions.push({
-      key: sessionId,
-      label,
-      agent: "claude",
-      model,
-      status,
-      started_at: startedAt,
-      updated_at: lastTimestamp,
-      summary,
-      tokens: typeof tokens === "number" ? Math.round(tokens) : null,
-      duration_ms: durationMs,
-    });
   }
 
   return sessions;
