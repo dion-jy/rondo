@@ -168,4 +168,6 @@ export interface SupabaseAcpSession {
 
 export interface RondoPluginConfig {
   syncIntervalMs?: number;
+  pushNotifyUrl?: string;
+  pushNotifySharedSecret?: string;
 }

@@ -9,7 +9,15 @@ import type {
   SupabaseCronRun,
   SupabaseAcpSession,
 } from "./types.js";
-import { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_BATCH_SIZE } from "./config.js";
+import {
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
+  SUPABASE_SYNC_KEY,
+  SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_BATCH_SIZE,
+  RONDO_PUSH_NOTIFY_URL,
+  RONDO_PUSH_NOTIFY_SHARED_SECRET,
+} from "./config.js";
 import { readFileSync as readFileSyncPkg } from "fs";
 import { join as joinPkg } from "path";
 import { fileURLToPath } from "url";
@@ -33,6 +41,13 @@ function getPluginVersion(): string | null {
 // ── Instance ID (stable per gateway boot, identifies this OpenClaw instance) ──
 
 let instanceId: string | undefined;
+const TERMINAL_PUSH_STATUSES = new Set(["ok", "error"]);
+const PUSH_STATE_MAX_KEYS = 2000;
+
+interface PushState {
+  version: 1;
+  notifiedRunKeys: string[];
+}
 
 function getInstanceId(cronDir: string): string {
   if (instanceId) return instanceId;
@@ -53,7 +68,7 @@ function getInstanceId(cronDir: string): string {
       // non-critical — will regenerate on next boot
     }
   }
-  return instanceId;
+  return instanceId!;
 }
 
 // ── User ID (resolved from device link token) ──
@@ -80,6 +95,150 @@ export function saveUserId(cronDir: string, userId: string): void {
     writeFileSync(getUserIdPath(cronDir), userId, "utf-8");
   } catch {
     // non-critical
+  }
+}
+
+function getPushStatePath(cronDir: string): string {
+  return join(cronDir, "..", ".rondo-push-state.json");
+}
+
+function getRunNotificationKey(run: Pick<SupabaseCronRun, "id" | "status">): string {
+  return `${run.id}:${run.status}`;
+}
+
+function readPushState(cronDir: string): PushState | null {
+  const statePath = getPushStatePath(cronDir);
+  try {
+    if (!existsSync(statePath)) return null;
+    const parsed = JSON.parse(readFileSync(statePath, "utf-8"));
+    if (!Array.isArray(parsed?.notifiedRunKeys)) return null;
+    return {
+      version: 1,
+      notifiedRunKeys: parsed.notifiedRunKeys
+        .filter((key: unknown): key is string => typeof key === "string")
+        .slice(-PUSH_STATE_MAX_KEYS),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writePushState(cronDir: string, state: PushState): void {
+  try {
+    const nextState: PushState = {
+      version: 1,
+      notifiedRunKeys: Array.from(new Set(state.notifiedRunKeys)).slice(-PUSH_STATE_MAX_KEYS),
+    };
+    writeFileSync(getPushStatePath(cronDir), JSON.stringify(nextState, null, 2), "utf-8");
+  } catch {
+    // non-critical
+  }
+}
+
+function isTerminalPushStatus(status: string | null | undefined): status is string {
+  return !!status && TERMINAL_PUSH_STATUSES.has(status);
+}
+
+async function triggerPushNotify(
+  run: SupabaseCronRun,
+  jobName: string,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+): Promise<boolean> {
+  if (!RONDO_PUSH_NOTIFY_URL || !RONDO_PUSH_NOTIFY_SHARED_SECRET) {
+    return false;
+  }
+
+  try {
+    const resp = await fetch(RONDO_PUSH_NOTIFY_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RONDO_PUSH_NOTIFY_SHARED_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        runId: run.id,
+        instanceId: run.instance_id,
+        userId: run.user_id,
+        jobId: run.job_id,
+        jobName,
+        status: run.status,
+        timestamp: run.timestamp,
+        summary: run.summary,
+        error: run.error,
+        deepLink: "/",
+      }),
+    });
+
+    const rawBody = await resp.text().catch(() => "");
+    if (!resp.ok) {
+      logger.error(
+        `[rondo] push-notify request failed for run ${run.id}: HTTP ${resp.status}${rawBody ? ` ${rawBody}` : ""}`
+      );
+      return false;
+    }
+
+    logger.info(
+      `[rondo] push-notify accepted for run ${run.id}${rawBody ? `: ${rawBody}` : ""}`
+    );
+    return true;
+  } catch (err) {
+    logger.error(
+      `[rondo] push-notify request error for run ${run.id}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
+}
+
+async function notifyNewTerminalRuns(
+  cronDir: string,
+  jobs: CronJob[],
+  runRows: SupabaseCronRun[],
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+): Promise<void> {
+  const terminalRuns = runRows
+    .filter((run) => isTerminalPushStatus(run.status))
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  if (terminalRuns.length === 0) return;
+
+  const existingState = readPushState(cronDir);
+  if (!existingState) {
+    writePushState(cronDir, {
+      version: 1,
+      notifiedRunKeys: terminalRuns.map((run) => getRunNotificationKey(run)),
+    });
+    logger.info(
+      `[rondo] Bootstrapped push state with ${terminalRuns.length} historical terminal runs; only future runs will trigger automatic push`
+    );
+    return;
+  }
+
+  const notified = new Set(existingState.notifiedRunKeys);
+  const pendingRuns = terminalRuns.filter((run) => !notified.has(getRunNotificationKey(run)));
+  if (pendingRuns.length === 0) return;
+
+  if (!RONDO_PUSH_NOTIFY_URL || !RONDO_PUSH_NOTIFY_SHARED_SECRET) {
+    logger.warn(
+      `[rondo] Automatic push is disabled; set RONDO_PUSH_NOTIFY_URL and RONDO_PUSH_NOTIFY_SHARED_SECRET to deliver ${pendingRuns.length} pending run notifications`
+    );
+    return;
+  }
+
+  const jobNames = new Map(jobs.map((job) => [job.id, job.name]));
+  const processedKeys: string[] = [];
+
+  for (const run of pendingRuns) {
+    const ok = await triggerPushNotify(run, jobNames.get(run.job_id) ?? run.job_id, logger);
+    if (ok) {
+      processedKeys.push(getRunNotificationKey(run));
+    }
+  }
+
+  if (processedKeys.length > 0) {
+    writePushState(cronDir, {
+      version: 1,
+      notifiedRunKeys: [...existingState.notifiedRunKeys, ...processedKeys],
+    });
   }
 }
 
@@ -280,8 +439,8 @@ async function supabaseUpsert(
     const resp = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
       method: "POST",
       headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_SYNC_KEY,
+        Authorization: `Bearer ${SUPABASE_SYNC_KEY}`,
         "Content-Type": "application/json",
         Prefer: `resolution=merge-duplicates,return=minimal`,
       },
@@ -328,8 +487,8 @@ async function supabaseUpsertOnce(
     const resp = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
       method: "POST",
       headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_SYNC_KEY,
+        Authorization: `Bearer ${SUPABASE_SYNC_KEY}`,
         "Content-Type": "application/json",
         Prefer: `resolution=merge-duplicates,return=minimal`,
       },
@@ -592,8 +751,8 @@ async function supabaseDeleteOrphans(
     const fetchUrl = `${SUPABASE_URL}/rest/v1/cron_jobs?instance_id=eq.${encodeURIComponent(instId)}&select=id`;
     const resp = await fetch(fetchUrl, {
       headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_SYNC_KEY,
+        Authorization: `Bearer ${SUPABASE_SYNC_KEY}`,
       },
     });
     if (!resp.ok) {
@@ -611,8 +770,8 @@ async function supabaseDeleteOrphans(
       {
         method: "DELETE",
         headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          apikey: SUPABASE_SYNC_KEY,
+          Authorization: `Bearer ${SUPABASE_SYNC_KEY}`,
           Prefer: "return=minimal",
         },
       }
@@ -639,6 +798,10 @@ export async function syncToSupabase(
   if (!userId) {
     logger.warn("[rondo] No userId linked; skipping sync to avoid unscoped data.");
     return;
+  }
+
+  if (!SUPABASE_SERVICE_ROLE_KEY) {
+    logger.warn("[rondo] RONDO_SUPABASE_SERVICE_ROLE_KEY not set — sync will use anon key (RLS may block writes).");
   }
 
   const jobs = readJobs(cronDir);
@@ -672,6 +835,7 @@ export async function syncToSupabase(
 
   // ── Upsert runs in batches ──
   const runRows = runs.map((r) => toSupabaseRun(r, instId, userId));
+  const syncedRunNotificationKeys = new Set<string>();
   let runErrors = 0;
   for (let i = 0; i < runRows.length; i += SUPABASE_BATCH_SIZE) {
     const batch = runRows.slice(i, i + SUPABASE_BATCH_SIZE);
@@ -682,6 +846,10 @@ export async function syncToSupabase(
     if (!result.ok) {
       logger.error(`[rondo] Failed to sync run batch: ${result.error}`);
       runErrors++;
+      continue;
+    }
+    for (const run of batch) {
+      syncedRunNotificationKeys.add(getRunNotificationKey(run));
     }
   }
 
@@ -705,5 +873,14 @@ export async function syncToSupabase(
 
   if (runErrors === 0 && jobResult.ok && sessionErrors === 0) {
     logger.info("[rondo] Sync completed successfully");
+  }
+
+  if (syncedRunNotificationKeys.size > 0) {
+    await notifyNewTerminalRuns(
+      cronDir,
+      jobs,
+      runRows.filter((run) => syncedRunNotificationKeys.has(getRunNotificationKey(run))),
+      logger
+    );
   }
 }
