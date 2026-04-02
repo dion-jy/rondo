@@ -24,6 +24,13 @@ const plugin = {
       type: "object",
       additionalProperties: false,
       properties: {
+        supabaseUrl: { type: "string" },
+        supabaseKey: { type: "string" },
+        userId: { type: "string" },
+        supabaseAuthEmail: {
+          type: "string",
+          description: "Email used for Google/GitHub SSO login. Plugin auto-resolves this to the Supabase Auth UUID for user_id.",
+        },
         syncIntervalMs: { type: "number", default: 300000 },
         pushNotifyUrl: { type: "string" },
         pushNotifySharedSecret: { type: "string" },
