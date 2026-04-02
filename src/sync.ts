@@ -844,6 +844,16 @@ export async function syncToSupabase(
     logger.warn("[rondo] RONDO_SUPABASE_SERVICE_ROLE_KEY not set — sync will use anon key (RLS may block writes).");
   }
 
+  if (!RONDO_PUSH_NOTIFY_URL || !RONDO_PUSH_NOTIFY_SHARED_SECRET) {
+    const missingVars = [
+      !RONDO_PUSH_NOTIFY_URL ? "RONDO_PUSH_NOTIFY_URL" : null,
+      !RONDO_PUSH_NOTIFY_SHARED_SECRET ? "RONDO_PUSH_NOTIFY_SHARED_SECRET" : null,
+    ].filter(Boolean).join(", ");
+    logger.warn(
+      `[rondo] Automatic push-notify env incomplete; missing ${missingVars}. Sync will continue without push delivery.`
+    );
+  }
+
   const jobs = readJobs(cronDir);
   const runs = readRuns(cronDir);
   const sessions = readSessions(cronDir);

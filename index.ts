@@ -25,6 +25,8 @@ const plugin = {
       additionalProperties: false,
       properties: {
         syncIntervalMs: { type: "number", default: 300000 },
+        pushNotifyUrl: { type: "string" },
+        pushNotifySharedSecret: { type: "string" },
       },
     },
   },
