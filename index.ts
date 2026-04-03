@@ -24,16 +24,30 @@ const plugin = {
       type: "object",
       additionalProperties: false,
       properties: {
-        supabaseUrl: { type: "string" },
-        supabaseKey: { type: "string" },
-        userId: { type: "string" },
-        supabaseAuthEmail: {
-          type: "string",
-          description: "Email used for Google/GitHub SSO login. Plugin auto-resolves this to the Supabase Auth UUID for user_id.",
-        },
         syncIntervalMs: { type: "number", default: 300000 },
+        pushTriggerMode: {
+          type: "string",
+          enum: ["auto", "managed", "legacy", "off"],
+          default: "auto",
+        },
         pushNotifyUrl: { type: "string" },
         pushNotifySharedSecret: { type: "string" },
+        supabaseUrl: {
+          type: "string",
+          description: "Deprecated. Bundled in plugin source for zero-config installs.",
+        },
+        supabaseKey: {
+          type: "string",
+          description: "Deprecated. Bundled anon key is used instead.",
+        },
+        userId: {
+          type: "string",
+          description: "Deprecated. Device linking now resolves user_id automatically.",
+        },
+        supabaseAuthEmail: {
+          type: "string",
+          description: "Deprecated. Device linking via /rondo link replaced email-based lookup.",
+        },
       },
     },
   },
@@ -63,7 +77,7 @@ const plugin = {
         // Initial sync after a short delay (let gateway finish startup)
         const initialDelay = setTimeout(async () => {
           try {
-            await syncToSupabase(cronDir, ctx.logger);
+            await syncToSupabase(cronDir, ctx.logger, config);
           } catch (err) {
             ctx.logger.error(
               `[rondo] Initial sync error: ${err instanceof Error ? err.message : String(err)}`
@@ -74,7 +88,7 @@ const plugin = {
         // Periodic sync
         const timer = setInterval(async () => {
           try {
-            await syncToSupabase(cronDir, ctx.logger);
+            await syncToSupabase(cronDir, ctx.logger, config);
           } catch (err) {
             ctx.logger.error(
               `[rondo] Sync error: ${err instanceof Error ? err.message : String(err)}`

@@ -36,6 +36,8 @@ OpenClaw plugin that syncs cron job data to [Rondo Dashboard](https://rondo-ui.v
 - ACP agent session tracking
 - Orphan job cleanup
 - Multi-tenant via device linking
+- Managed Web Push via server-side trigger/Edge Function
+- Legacy plugin-triggered push remains supported for existing installs
 
 ## Architecture
 
@@ -53,6 +55,27 @@ OpenClaw plugin that syncs cron job data to [Rondo Dashboard](https://rondo-ui.v
 ```
 
 No inbound ports, no tunnels — outbound HTTPS only.
+
+## Managed Push
+
+Default path for new installs:
+
+1. Install plugin
+2. `/rondo link`
+3. Browser notification permission + Web Push subscribe in Rondo UI
+4. Server-side trigger delivers background push on terminal cron runs
+
+The plugin does not need push secrets for this managed path. Push secrets stay server-side in Supabase Vault / Edge secrets.
+
+### Legacy compatibility
+
+Existing installs that already use plugin-triggered push can keep working:
+
+- `pushTriggerMode=legacy`
+- `pushNotifyUrl`
+- `pushNotifySharedSecret`
+
+If these are omitted, the plugin defaults to managed mode and only performs sync.
 
 ## Upgrading
 
@@ -78,7 +101,16 @@ No manual file edits under `~/.openclaw/plugins/` are needed or supported.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `syncIntervalMs` | `300000` (5 min) | Sync interval in milliseconds |
-| `linkToken` | — | One-time device link token from Rondo UI |
+| `pushTriggerMode` | `auto` | `managed` for server-side push only, `legacy` for plugin-trigger push, `off` to disable push handoff |
+| `pushNotifyUrl` | — | Legacy plugin-trigger push endpoint |
+| `pushNotifySharedSecret` | — | Legacy plugin-trigger shared secret |
+
+Deprecated but still accepted for backward compatibility:
+
+- `supabaseUrl`
+- `supabaseKey`
+- `userId`
+- `supabaseAuthEmail`
 
 ## Zero-config install guarantee (important)
 
@@ -97,11 +129,12 @@ Without proper RLS, anon clients may read/write unintended rows.
 ### Maintainer release checklist
 
 1. Update `src/config.ts` (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) if rotated
-2. Confirm `service_role` is not referenced anywhere in source
+2. Confirm `service_role` is not referenced anywhere in distributed user config
 3. Validate RLS SQL is up to date (`sql/002_user_id_rls.sql`, `sql/003_enforce_user_scope.sql`)
-4. Bump `package.json` version
-5. Publish via release or tag (`v*`)
-6. Verify fresh install works without manual file edits
+4. Validate managed push SQL/Edge assets (`sql/007_push_notification_events.sql`, `sql/008_managed_push.sql`, `supabase/functions/push-notify`)
+5. Bump `package.json` version
+6. Publish via release or tag (`v*`)
+7. Verify fresh install works without manual file edits
 
 ## Automated Publishing
 

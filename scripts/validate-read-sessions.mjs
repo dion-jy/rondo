@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const distSyncPath = join(dirname(new URL(import.meta.url).pathname), "..", ".tmp-dist", "src", "sync.js");
+const distSyncPath = join(dirname(new URL(import.meta.url).pathname), "..", ".tmp-dist", "sync.js");
 const { readSessions } = await import(pathToFileURL(distSyncPath).href);
 
 function writeSessionFile(baseDir, agent, fileName, lines) {

@@ -18,10 +18,19 @@ export const SUPABASE_SYNC_KEY = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 
 export const DEFAULT_SYNC_INTERVAL_MS = 300_000; // 5 minutes
 export const SUPABASE_BATCH_SIZE = 100;
+export const DEFAULT_PUSH_TRIGGER_MODE = "auto";
 export const RONDO_PUSH_NOTIFY_URL =
   process.env.RONDO_PUSH_NOTIFY_URL ?? "";
 export const RONDO_PUSH_NOTIFY_SHARED_SECRET =
   process.env.RONDO_PUSH_NOTIFY_SHARED_SECRET ?? "";
+
+function normalizePushTriggerMode(
+  value: unknown,
+): RondoPluginConfig["pushTriggerMode"] {
+  return value === "managed" || value === "legacy" || value === "off"
+    ? value
+    : DEFAULT_PUSH_TRIGGER_MODE;
+}
 
 // ── Resolve config from plugin config ──
 
@@ -34,5 +43,10 @@ export function resolveConfig(pluginConfig?: Record<string, unknown>): RondoPlug
       (cfg.pushNotifyUrl ?? RONDO_PUSH_NOTIFY_URL) || undefined,
     pushNotifySharedSecret:
       (cfg.pushNotifySharedSecret ?? RONDO_PUSH_NOTIFY_SHARED_SECRET) || undefined,
+    pushTriggerMode: normalizePushTriggerMode(cfg.pushTriggerMode),
+    supabaseUrl: cfg.supabaseUrl,
+    supabaseKey: cfg.supabaseKey,
+    userId: cfg.userId,
+    supabaseAuthEmail: cfg.supabaseAuthEmail,
   };
 }

@@ -8,6 +8,7 @@ import type {
   SupabaseCronJob,
   SupabaseCronRun,
   SupabaseAcpSession,
+  RondoPluginConfig,
 } from "./types.js";
 import {
   SUPABASE_URL,
@@ -15,8 +16,6 @@ import {
   SUPABASE_SYNC_KEY,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_BATCH_SIZE,
-  RONDO_PUSH_NOTIFY_URL,
-  RONDO_PUSH_NOTIFY_SHARED_SECRET,
 } from "./config.js";
 import { readFileSync as readFileSyncPkg } from "fs";
 import { join as joinPkg } from "path";
@@ -43,6 +42,8 @@ function getPluginVersion(): string | null {
 let instanceId: string | undefined;
 const TERMINAL_PUSH_STATUSES = new Set(["ok", "error"]);
 const PUSH_STATE_MAX_KEYS = 2000;
+let didLogManagedPushMode = false;
+let didWarnLegacyPushConfig = false;
 
 interface PushState {
   version: 1;
@@ -142,17 +143,15 @@ function isTerminalPushStatus(status: string | null | undefined): status is stri
 async function triggerPushNotify(
   run: SupabaseCronRun,
   jobName: string,
+  pushNotifyUrl: string,
+  pushNotifySharedSecret: string,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<boolean> {
-  if (!RONDO_PUSH_NOTIFY_URL || !RONDO_PUSH_NOTIFY_SHARED_SECRET) {
-    return false;
-  }
-
   try {
-    const resp = await fetch(RONDO_PUSH_NOTIFY_URL, {
+    const resp = await fetch(pushNotifyUrl, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${RONDO_PUSH_NOTIFY_SHARED_SECRET}`,
+        Authorization: `Bearer ${pushNotifySharedSecret}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -193,8 +192,30 @@ async function notifyNewTerminalRuns(
   cronDir: string,
   jobs: CronJob[],
   runRows: SupabaseCronRun[],
+  pluginConfig: RondoPluginConfig | undefined,
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
 ): Promise<void> {
+  const mode = pluginConfig?.pushTriggerMode ?? "auto";
+  const pushNotifyUrl = pluginConfig?.pushNotifyUrl ?? "";
+  const pushNotifySharedSecret = pluginConfig?.pushNotifySharedSecret ?? "";
+  const legacyPushConfigured = !!(pushNotifyUrl && pushNotifySharedSecret);
+  const legacyPushEnabled =
+    mode === "legacy" || (mode === "auto" && legacyPushConfigured);
+
+  if (mode === "off") {
+    return;
+  }
+
+  if (!legacyPushEnabled) {
+    if (!didLogManagedPushMode) {
+      logger.info(
+        "[rondo] Managed Push mode active — plugin will sync only. Server-side trigger/Edge path is expected to deliver web push."
+      );
+      didLogManagedPushMode = true;
+    }
+    return;
+  }
+
   const terminalRuns = runRows
     .filter((run) => isTerminalPushStatus(run.status))
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -217,10 +238,13 @@ async function notifyNewTerminalRuns(
   const pendingRuns = terminalRuns.filter((run) => !notified.has(getRunNotificationKey(run)));
   if (pendingRuns.length === 0) return;
 
-  if (!RONDO_PUSH_NOTIFY_URL || !RONDO_PUSH_NOTIFY_SHARED_SECRET) {
-    logger.warn(
-      `[rondo] Automatic push is disabled; set RONDO_PUSH_NOTIFY_URL and RONDO_PUSH_NOTIFY_SHARED_SECRET to deliver ${pendingRuns.length} pending run notifications`
-    );
+  if (!legacyPushConfigured) {
+    if (!didWarnLegacyPushConfig) {
+      logger.warn(
+        "[rondo] Legacy push mode selected but push endpoint config is missing; set pushNotifyUrl/pushNotifySharedSecret or switch back to managed mode."
+      );
+      didWarnLegacyPushConfig = true;
+    }
     return;
   }
 
@@ -228,7 +252,13 @@ async function notifyNewTerminalRuns(
   const processedKeys: string[] = [];
 
   for (const run of pendingRuns) {
-    const ok = await triggerPushNotify(run, jobNames.get(run.job_id) ?? run.job_id, logger);
+    const ok = await triggerPushNotify(
+      run,
+      jobNames.get(run.job_id) ?? run.job_id,
+      pushNotifyUrl,
+      pushNotifySharedSecret,
+      logger
+    );
     if (ok) {
       processedKeys.push(getRunNotificationKey(run));
     }
@@ -830,7 +860,8 @@ async function supabaseDeleteOrphans(
 
 export async function syncToSupabase(
   cronDir: string,
-  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void }
+  logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
+  pluginConfig?: RondoPluginConfig,
 ): Promise<void> {
   const instId = getInstanceId(cronDir);
   const userId = resolveUserId(cronDir);
@@ -842,16 +873,6 @@ export async function syncToSupabase(
 
   if (!SUPABASE_SERVICE_ROLE_KEY) {
     logger.warn("[rondo] RONDO_SUPABASE_SERVICE_ROLE_KEY not set — sync will use anon key (RLS may block writes).");
-  }
-
-  if (!RONDO_PUSH_NOTIFY_URL || !RONDO_PUSH_NOTIFY_SHARED_SECRET) {
-    const missingVars = [
-      !RONDO_PUSH_NOTIFY_URL ? "RONDO_PUSH_NOTIFY_URL" : null,
-      !RONDO_PUSH_NOTIFY_SHARED_SECRET ? "RONDO_PUSH_NOTIFY_SHARED_SECRET" : null,
-    ].filter(Boolean).join(", ");
-    logger.warn(
-      `[rondo] Automatic push-notify env incomplete; missing ${missingVars}. Sync will continue without push delivery.`
-    );
   }
 
   const jobs = readJobs(cronDir);
@@ -930,6 +951,7 @@ export async function syncToSupabase(
       cronDir,
       jobs,
       runRows.filter((run) => syncedRunNotificationKeys.has(getRunNotificationKey(run))),
+      pluginConfig,
       logger
     );
   }

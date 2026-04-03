@@ -170,4 +170,9 @@ export interface RondoPluginConfig {
   syncIntervalMs?: number;
   pushNotifyUrl?: string;
   pushNotifySharedSecret?: string;
+  pushTriggerMode?: "auto" | "managed" | "legacy" | "off";
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  userId?: string;
+  supabaseAuthEmail?: string;
 }

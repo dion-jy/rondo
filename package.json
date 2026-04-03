@@ -1,9 +1,9 @@
 {
   "name": "@dion-jy/rondo",
-  "version": "2.3.2",
+  "version": "2.3.1",
   "type": "module",
   "main": "index.ts",
-  "description": "OpenClaw plugin \u2014 syncs cron job/run data to Supabase for external dashboard",
+  "description": "OpenClaw plugin — syncs cron job/run data to Supabase for external dashboard",
   "scripts": {
     "validate:sessions": "node ../rondo-ui/node_modules/typescript/bin/tsc -p tsconfig.validate.json --outDir .tmp-dist --typeRoots ../rondo-ui/node_modules/@types && node scripts/validate-read-sessions.mjs"
   },

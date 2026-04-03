@@ -1,34 +1,19 @@
 {
   "id": "rondo",
   "name": "Rondo",
-  "description": "Cron monitoring dashboard - syncs job/run data to external storage",
+  "description": "Cron monitoring dashboard — syncs job/run data to external storage",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "supabaseUrl": {
-        "type": "string"
-      },
-      "supabaseKey": {
-        "type": "string"
-      },
-      "userId": {
-        "type": "string"
-      },
-      "supabaseAuthEmail": {
-        "type": "string",
-        "description": "Email used for Google/GitHub SSO login. Plugin auto-resolves this to the Supabase Auth UUID for user_id."
-      },
-      "syncIntervalMs": {
-        "type": "number",
-        "default": 300000
-      },
-      "pushNotifyUrl": {
-        "type": "string"
-      },
-      "pushNotifySharedSecret": {
-        "type": "string"
-      }
+      "syncIntervalMs": { "type": "number", "default": 300000 },
+      "pushTriggerMode": { "type": "string", "enum": ["auto", "managed", "legacy", "off"], "default": "auto" },
+      "pushNotifyUrl": { "type": "string", "description": "Optional legacy plugin-trigger endpoint. Leave empty for managed server-side push." },
+      "pushNotifySharedSecret": { "type": "string", "description": "Optional legacy plugin-trigger shared secret. Leave empty for managed server-side push." },
+      "supabaseUrl": { "type": "string", "description": "Deprecated. Bundled in plugin source for zero-config installs." },
+      "supabaseKey": { "type": "string", "description": "Deprecated. Bundled anon key is used instead." },
+      "userId": { "type": "string", "description": "Deprecated. Device linking now resolves user_id automatically." },
+      "supabaseAuthEmail": { "type": "string", "description": "Deprecated. Email-based UUID lookup is no longer used." }
     }
   }
 }
