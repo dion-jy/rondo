@@ -5,6 +5,9 @@ import type {
   CronJob,
   CronRun,
   AcpSessionInfo,
+  SessionType,
+  RuntimeType,
+  SourceChannel,
   SupabaseCronJob,
   SupabaseCronRun,
   SupabaseAcpSession,
@@ -584,6 +587,97 @@ function inferSessionAgent(agent: string, sessionId: string): string {
   return matchedAgent?.[1] ?? "claude";
 }
 
+function normalizeSourceChannel(raw: string | null | undefined): SourceChannel {
+  if (!raw) return "unknown";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "telegram" || normalized === "webchat") return normalized;
+  return "unknown";
+}
+
+function looksLikeHeartbeat(...values: Array<string | null | undefined>): boolean {
+  const haystack = values
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n")
+    .toLowerCase();
+
+  if (!haystack) return false;
+
+  return (
+    haystack.includes("heartbeat")
+    || haystack.includes("heartbeat_ok")
+    || haystack.includes("read heartbeat.md")
+  );
+}
+
+export function classifySessionIdentity(input: {
+  key: string;
+  label?: string | null;
+  display?: string | null;
+}): {
+  session_type: SessionType;
+  runtime_type: RuntimeType;
+  source_channel: SourceChannel;
+} {
+  const key = input.key ?? "";
+  const label = input.label ?? null;
+  const display = input.display ?? null;
+
+  if (/^agent:[^:]+:acp:/.test(key)) {
+    return {
+      session_type: "acp",
+      runtime_type: "acp",
+      source_channel: "unknown",
+    };
+  }
+
+  if (/^agent:[^:]+:subagent:/.test(key)) {
+    return {
+      session_type: "subagent",
+      runtime_type: "subagent",
+      source_channel: "unknown",
+    };
+  }
+
+  if (/^agent:main:cron:/.test(key)) {
+    return {
+      session_type: "cron",
+      runtime_type: "native",
+      source_channel: "unknown",
+    };
+  }
+
+  if (key === "agent:main:main" && looksLikeHeartbeat(label, display)) {
+    return {
+      session_type: "heartbeat",
+      runtime_type: "native",
+      source_channel: "unknown",
+    };
+  }
+
+  const mainChannelMatch = key.match(/^agent:main:([^:]+):.+$/);
+  if (mainChannelMatch) {
+    return {
+      session_type: "main",
+      runtime_type: "native",
+      source_channel: normalizeSourceChannel(mainChannelMatch[1]),
+    };
+  }
+
+  if (key === "agent:main:main") {
+    return {
+      session_type: "main",
+      runtime_type: "native",
+      source_channel: "unknown",
+    };
+  }
+
+  return {
+    session_type: "other",
+    runtime_type: "unknown",
+    source_channel: "unknown",
+  };
+}
+
 /**
  * Read head (first N bytes) and tail (last N bytes) of a file efficiently.
  * Avoids reading entire large session files into memory.
@@ -698,6 +792,11 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
 
       const sessionId = sessionHeader.id ?? file.replace(".jsonl", "");
       const startedAt = sessionHeader.timestamp;
+      const sessionDisplay
+        = sessionHeader.display
+        ?? sessionHeader.displayName
+        ?? sessionHeader.display_name
+        ?? null;
 
       // Find first user message for label
       // Priority: sessionHeader.label > parsed from first user message
@@ -769,6 +868,11 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
       const startMs = new Date(startedAt).getTime();
       const endMs = new Date(lastTimestamp).getTime();
       const durationMs = endMs > startMs ? Math.round(endMs - startMs) : null;
+      const classification = classifySessionIdentity({
+        key: sessionId,
+        label,
+        display: sessionDisplay,
+      });
 
       sessions.push({
         key: sessionId,
@@ -781,6 +885,9 @@ export function readSessions(cronDir: string, maxAgeMs = 2 * 60 * 60 * 1000): Ac
         summary,
         tokens: typeof tokens === "number" ? Math.round(tokens) : null,
         duration_ms: durationMs,
+        session_type: classification.session_type,
+        runtime_type: classification.runtime_type,
+        source_channel: classification.source_channel,
       });
     }
   }
@@ -804,6 +911,9 @@ function toSupabaseSession(
     summary: session.summary,
     tokens: session.tokens,
     duration_ms: session.duration_ms,
+    session_type: session.session_type,
+    runtime_type: session.runtime_type,
+    source_channel: session.source_channel,
     instance_id: instId,
     user_id: userId,
     synced_at: new Date().toISOString(),

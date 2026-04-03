@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const distSyncPath = join(dirname(new URL(import.meta.url).pathname), "..", ".tmp-dist", "sync.js");
-const { readSessions } = await import(pathToFileURL(distSyncPath).href);
+const { classifySessionIdentity, readSessions } = await import(pathToFileURL(distSyncPath).href);
 
 function writeSessionFile(baseDir, agent, fileName, lines) {
   const sessionsDir = join(baseDir, "agents", agent, "sessions");
@@ -93,6 +93,16 @@ try {
     "codex",
     "codex session should preserve codex agent"
   );
+  assert.equal(
+    byKey.get("agent:claude:acp:11111111-1111-1111-1111-111111111111")?.session_type,
+    "acp",
+    "acp sessions should be classified as acp"
+  );
+  assert.equal(
+    byKey.get("agent:claude:acp:11111111-1111-1111-1111-111111111111")?.runtime_type,
+    "acp",
+    "acp sessions should carry acp runtime type"
+  );
   assert.match(
     byKey.get("agent:codex:acp:22222222-2222-2222-2222-222222222222")?.label ?? "",
     /Fix Rondo multi-agent ACP sync visibility/,
@@ -142,5 +152,68 @@ try {
 } finally {
   cleanupFixture(claudeOnlyRoot);
 }
+
+assert.deepEqual(
+  classifySessionIdentity({ key: "agent:codex:subagent:44444444-4444-4444-4444-444444444444" }),
+  {
+    session_type: "subagent",
+    runtime_type: "subagent",
+    source_channel: "unknown",
+  },
+  "subagent sessions should be classified from key"
+);
+
+assert.deepEqual(
+  classifySessionIdentity({ key: "agent:main:cron:daily-sync" }),
+  {
+    session_type: "cron",
+    runtime_type: "native",
+    source_channel: "unknown",
+  },
+  "cron sessions should be classified from key"
+);
+
+assert.deepEqual(
+  classifySessionIdentity({
+    key: "agent:main:main",
+    label: "HEARTBEAT_OK after checking inbox",
+  }),
+  {
+    session_type: "heartbeat",
+    runtime_type: "native",
+    source_channel: "unknown",
+  },
+  "main session with heartbeat label should be heartbeat"
+);
+
+assert.deepEqual(
+  classifySessionIdentity({ key: "agent:main:telegram:manual-thread-1" }),
+  {
+    session_type: "main",
+    runtime_type: "native",
+    source_channel: "telegram",
+  },
+  "telegram main sessions should expose source_channel"
+);
+
+assert.deepEqual(
+  classifySessionIdentity({ key: "agent:main:webchat:browser-thread-2" }),
+  {
+    session_type: "main",
+    runtime_type: "native",
+    source_channel: "webchat",
+  },
+  "webchat main sessions should expose source_channel"
+);
+
+assert.deepEqual(
+  classifySessionIdentity({ key: "legacy-session-key" }),
+  {
+    session_type: "other",
+    runtime_type: "unknown",
+    source_channel: "unknown",
+  },
+  "unknown keys should fall back to other/unknown"
+);
 
 console.log("validate-read-sessions: ok");

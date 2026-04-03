@@ -104,12 +104,43 @@ CREATE INDEX IF NOT EXISTS idx_cron_runs_status
 CREATE INDEX IF NOT EXISTS idx_cron_runs_user
   ON cron_runs (user_id);
 
+-- ── acp_sessions ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS acp_sessions (
+  key               TEXT PRIMARY KEY,
+  label             TEXT,
+  agent             TEXT,
+  model             TEXT,
+  status            TEXT,
+  started_at        TIMESTAMPTZ,
+  updated_at        TIMESTAMPTZ,
+  summary           TEXT,
+  tokens            INTEGER,
+  duration_ms       INTEGER,
+  session_type      TEXT,
+  runtime_type      TEXT,
+  source_channel    TEXT,
+  instance_id       TEXT NOT NULL,
+  user_id           UUID,
+  synced_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_acp_sessions_user
+  ON acp_sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_acp_sessions_user_session_type_updated
+  ON acp_sessions (user_id, session_type, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_acp_sessions_runtime_type
+  ON acp_sessions (runtime_type);
+CREATE INDEX IF NOT EXISTS idx_acp_sessions_source_channel
+  ON acp_sessions (source_channel);
+
 -- ── RLS (Row Level Security) ──────────────────────────────────────────
 -- Plugin uses service_role key → bypasses RLS for writes.
 -- UI uses anon key + user JWT → auth.uid() filters reads.
 
 ALTER TABLE cron_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cron_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE acp_sessions ENABLE ROW LEVEL SECURITY;
 
 -- Authenticated users see only their own data
 CREATE POLICY "Users can view own jobs"
@@ -127,6 +158,15 @@ CREATE POLICY "Users can view own runs"
 
 CREATE POLICY "Service role can manage all runs"
   ON cron_runs FOR ALL
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
+
+CREATE POLICY "Users can view own sessions"
+  ON acp_sessions FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Service role can manage all sessions"
+  ON acp_sessions FOR ALL
   USING (auth.role() = 'service_role')
   WITH CHECK (auth.role() = 'service_role');
 

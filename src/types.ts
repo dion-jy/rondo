@@ -146,7 +146,14 @@ export interface AcpSessionInfo {
   summary: string | null;
   tokens: number | null;
   duration_ms: number | null;
+  session_type: SessionType;
+  runtime_type: RuntimeType;
+  source_channel: SourceChannel;
 }
+
+export type SessionType = "main" | "acp" | "subagent" | "cron" | "heartbeat" | "other";
+export type RuntimeType = "acp" | "subagent" | "native" | "unknown";
+export type SourceChannel = "telegram" | "webchat" | "unknown";
 
 export interface SupabaseAcpSession {
   key: string;
@@ -159,6 +166,9 @@ export interface SupabaseAcpSession {
   summary: string | null;
   tokens: number | null;
   duration_ms: number | null;
+  session_type: SessionType;
+  runtime_type: RuntimeType;
+  source_channel: SourceChannel;
   instance_id: string;
   user_id: string | null;
   synced_at: string;
